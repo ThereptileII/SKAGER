@@ -1,0 +1,246 @@
+# OpenNav X Agent Instructions
+
+The authoritative product specification is:
+
+`OpenNavX_Codex_Project_Specification.md`
+
+The authoritative visual reference is the unchanged supplied HTML prototype:
+
+`docs/design/prototype/index.html`
+
+Its original-file manifest is `docs/design/prototype-original.json`. Never edit
+those original files. Put instrumentation in tools or a separate derived copy.
+
+The current project goal is:
+
+`PROJECT_GOAL.md`
+
+## Jira-driven public-beta work
+
+[Navigare / SCRUM board](https://swedishcountrysideliving.atlassian.net/jira/software/projects/SCRUM/boards/1)
+is the sole development backlog. The public-beta requirements are captured in
+`docs/public-beta-contract.md`; that contract and technical evidence are not a
+second roadmap. Do not maintain a competing private TODO list.
+
+At the beginning of each substantial cycle:
+
+1. Read the board, its actual column/status mapping, In Progress and Testing
+   issues, and all unresolved `scope-public-beta` issues. Complete pagination.
+2. Read the selected issues' acceptance criteria, dependencies and material
+   comments. Never infer a decision from a label or an older comment alone.
+3. Prioritize safety/security/data-loss blockers, then public-beta launch
+   blockers at Highest, other public-beta Highest, High, Medium and Low.
+   Dependencies may change the eligible order. Post-beta/Future work waits.
+4. Record the selection in Jira before unrelated implementation. Create or
+   update an issue for additional required work; split distinct deliverables
+   into appropriate tasks/subtasks. Do not silently expand scope.
+5. Move work to In Progress when implementing; Testing when implementation is
+   ready but required verification remains; Done only after its acceptance
+   criteria and evidence pass. Preserve failed evidence and open blockers.
+6. Record exact commits, CI links, validation and remaining gates in Jira or
+   linked technical evidence. A passing build is not feature completion.
+
+The board's English columns currently map to Swedish Jira statuses:
+Idea → Idea, To Do → Att göra, In Progress → Pågående,
+Testing → Testning, Done → Klart. Read the current board mapping and available
+transitions rather than assuming status-category queries identify each column.
+
+## Development strategy and task sizing
+
+For the current Windows stabilization and boat-test delivery stage, the user's
+2026-10-02 instruction is to use **GPT-6 Astra with High reasoning** for bounded
+parallel subagents. Give each agent one clear objective, owned files, acceptance
+criteria and a concise handoff. The root agent owns final integration. This
+stage-specific instruction supersedes the earlier Luna/Sol task routing.
+
+For reversible, noncritical documentation, copy, layout, or function changes,
+run focused checks relevant to the change and a smoke or visual review. Avoid
+redundant broad reruns and tests that only mirror the implementation. Preserve
+all navigation, safety, data-loss, security, authentication, payment,
+installer, updater, recovery, exact-revision, native Windows, boat, release,
+and source-compliance gates. Do not remove or weaken existing failure
+assertions. Batch full suites at integration and release milestones instead of
+running them for every minor edit. Keep Jira as the sole backlog; do not create
+a TODO file.
+
+`SCRUM-97` governs this workflow. `SCRUM-14`, `SCRUM-15` and `SCRUM-16` retain
+the existing prototype, chart-presentation and Online AIS acceptance gates.
+The approved public identity in `SCRUM-89` is **SKAGER / SKAGER App** with
+`skager.app` selected; domain control and legal clearance remain separate gates.
+Preserve internal XNav/OpenNav namespaces where renaming adds technical risk,
+and never modify the immutable original HTML to apply branding.
+
+Before public launch, qualify one exact release revision across product, native
+Windows, boat PC, installer/updater, source/licenses, website, commerce, portal,
+support, privacy/security and operations. OpenCPN remains a separately installed
+prerequisite. Unqualified XNav hardware output must be unavailable/default-off;
+SmartNav never steers. Keep public payment/download access closed until the
+full readiness report is reviewed and the user explicitly gives GO.
+
+## Background qualification and parallel progress
+
+Long-running builds, endurance runs and other lengthy gates must run
+asynchronously while independent, eligible Jira work continues. Record the
+exact candidate commit, CI run/job or process handle, and outstanding gates.
+Poll that live handle at sensible intervals; do not restart or cancel a healthy
+run merely because an observation timed out or unrelated work changed.
+
+When a Windows build fails, first reproduce the exact failing prerequisite in
+an inexpensive targeted native diagnostic. Verify the source-grounded repair
+before starting another full candidate build. Start one integrated Windows
+qualification path before redundant expensive UI fanout; broaden testing only
+when the focused result and dependencies justify it. Distinguish build/test
+failures from observed application crashes, and retain the actual failure logs.
+
+Freeze the candidate under qualification. Use separate worktrees and bounded
+agents for independent implementation, reviews, evidence inspection and
+deployment preparation. Do not share mutable build directories, profiles or
+hardware with a running test, or oversubscribe its resources in a way that
+invalidates performance evidence. Respect dependencies and the user's current
+software/boat-first priority; background time does not authorize website work.
+
+Distinguish two deliverables:
+
+- **Development boat review:** use the existing pending-endurance package after
+  its mandatory functional, security, installer/recovery, display and chart
+  prerequisites pass. Verify the artifact and complete the real boat's backup,
+  input-only audit and smoke checks. Label remaining gates explicitly. Endurance
+  may continue independently; this is not release or navigation approval.
+- **Public-beta/release qualification:** retain all required full-duration,
+  exact-revision gates and physical acceptance. A failed remaining gate prevents
+  release and requires assessing any earlier development deployment.
+
+Use focused checks for small reversible changes and batch broad suites at
+meaningful integration/release milestones. Reuse only dependency evidence
+allowed by the existing provenance/reuse checks. Do not rerun a full endurance
+suite for each documentation or cosmetic edit; assess affected tests instead.
+Never transfer release acceptance to a different commit or weaken critical
+checks to accelerate delivery. See [the boat testing workflow](docs/boat-pc-development.md#early-development-review-versus-release-acceptance).
+
+## Core rules
+
+- Preserve standard OpenCPN as **Legacy Mode**.
+- Implement **XNav**, **Legacy**, and **Safe Mode** against the same underlying OpenCPN navigation/user data.
+- The initial mode switch may use a controlled restart. Reliability is more important than live re-parenting.
+- Do not rewrite OpenCPN functionality which can be reused safely.
+- Keep direct upstream modifications narrow, reviewable, and documented.
+- UI, Vessel Data, SmartNav, OpenCPN integration, and hardware adapters must remain separate.
+- Never invent unavailable sensor, chart, AIS, device, or navigation data.
+- Missing, stale, invalid, estimated, and uncertain data must be represented explicitly.
+- No autonomous steering in the initial product.
+- Safety-relevant commands require appropriate confirmation/acknowledgement handling.
+- Develop primarily on Linux.
+- Native Windows MSVC build is mandatory for Windows-facing milestones.
+- Windows rendering is authoritative for release UI acceptance.
+- Wine or cross-compilation may assist development but does not replace native Windows validation.
+- A feature is not complete merely because it compiles.
+- Keep the project runnable after every meaningful milestone.
+- Work in small vertical slices.
+- Inspect actual OpenCPN source before assuming APIs, symbols, class structure, or plugin capabilities.
+- Do not silently alter OpenCPN navigation semantics while redesigning UI.
+- Do not modify an unsupported or unknown OpenCPN build.
+- Preserve charts, routes, tracks, waypoints, plugins, connections, and configuration across XNav/Legacy switching and product updates.
+
+## Before a major change
+
+1. Read the relevant specification section.
+2. Inspect the corresponding pinned OpenCPN source.
+3. Identify existing functionality that can be reused.
+4. Identify whether the work belongs in UI, Vessel Data, SmartNav, an adapter, or the OpenCPN integration bridge.
+5. Define how the change will be tested on Linux.
+6. Define whether it requires a Windows gate.
+7. Implement the smallest maintainable change.
+8. Build and test it.
+9. Capture evidence where required.
+10. Update architecture/upstream-patch documentation if boundaries changed.
+
+## Visual development
+
+Reference resolution: **1280×800**.
+
+Compare implemented XNav screens against canonical renders of the HTML at
+1280×800, device scale factor 1. The user superseded the older image-based
+design policy on 2026-09-28: safety/navigation correctness, then HTML prototype,
+then extracted prototype specification, then written brief, older image, and
+current implementation. Match exact computed values and interactions; do not
+redesign the prototype. Its illustrative values/geography and simulated
+equipment behavior are not production data or navigation semantics.
+
+Native Windows and the boat display remain visual acceptance gates. Linux font
+fallback screenshots do not qualify Windows typography. Keep the UI native.
+
+Do not approximate XNav using visibly native desktop controls where the design specifies an XNav component.
+
+## Linux / Windows rule
+
+Use Linux for:
+- normal Codex work
+- source editing
+- OpenCPN Linux build
+- SmartNav and Vessel Data development
+- simulator work
+- unit tests
+- static analysis
+
+Use native Windows for:
+- authoritative MSVC build
+- wxWidgets/platform integration
+- DLL/plugin loading
+- installer/update/repair/rollback/uninstall
+- registry/UAC/shortcuts
+- fonts and DPI scaling
+- authoritative 1280×800 screenshots
+- final UI acceptance
+- target-hardware testing
+
+## Upstream OpenCPN
+
+Keep the selected upstream revision pinned.
+
+Recommended repository location:
+
+`upstream/OpenCPN/`
+
+Document every direct upstream modification in:
+
+`docs/upstream-patches.md`
+
+Do not add a new OpenCPN version to the supported compatibility manifest until it has passed the required Windows regression gates.
+
+## External Claude Code specialists
+
+Codex remains the lead and makes all final implementation, safety and release
+choices. The user's 2026-10-10 strategy makes Claude a regular specialist for
+complicated work, not only a last-resort reviewer. Proactively delegate bounded
+architecture/design analysis, debugging, security, regression investigation and
+code review through `tools/agents/claude-review`, while Codex and its subagents
+progress independent implementation/integration work. Do not invoke it for every
+trivial edit, serialize independent tasks unnecessarily or repeat equivalent
+reviews. Follow
+[the scoped review workflow](tools/agents/README.md).
+
+Default most Claude assignments to **Opus 5** (`claude-opus-5`, high effort).
+Use **Opus 5.5** (`--model claude-opus-5-5`) for the hardest cross-subsystem
+architecture, persistent crashes/concurrency defects, security/safety boundaries
+or unresolved disagreements between reviews. These pinned IDs avoid a moving
+`opus` alias. Claude's child specialists inherit the selected model. Keep tasks
+small, state ownership/acceptance, and run independent Claude/Codex assignments
+in parallel within resource and budget limits. Never silently downgrade an
+unavailable model or accept a review whose reported model differs.
+
+Select only necessary source/interfaces/tests with repeated `--path`, state the
+specific question with `--question`, and choose `--kind`. The wrapper uses
+non-interactive Claude Code, an immutable scoped snapshot and enforced read-only
+isolation. Claude may delegate to its configured read-only specialists. Review
+its evidence and limitations independently; no finding is automatically a defect,
+a fix, test evidence or approval. Cite the review receipt when recording its use.
+Do not send private boat data, credentials or unrelated content in the scope.
+
+Do not run an unrestricted Claude implementation session in a Codex-owned working
+tree. This wrapper cannot implement. Claude implementation delegation is allowed
+within already authorized project tasks, but requires a dedicated Git worktree/
+branch, explicit ownership and a separately restricted implementation session;
+establish its file/tool boundaries before enabling writes. Codex integrates
+reviewed changes. Source edits may continue after review snapshot capture, but
+revalidate findings if the receipt says the selected source changed. Failures or
+missing containment must stop the review, never trigger permission bypass.

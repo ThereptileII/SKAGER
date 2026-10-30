@@ -1,0 +1,207 @@
+# Advisory energy model and calibrated input contract
+
+## Prototype presentation boundary
+
+`application::PresentEnergy` copies assessed readings and the existing numerical
+result into an owned view. It never computes route geometry or a new range model.
+The result must match the current producer observation time; arrival must also
+match the immutable current route publication verified by `PresentPassage`.
+Stale SOC removes range/arrival; stale GPS or absent route removes arrival while
+an independently valid range may remain. Existing model rejection reasons are
+retained. Fourteen deterministic presentation checks cover these boundaries,
+shortfall, invalid SOC and retained-view lifetime after route deletion.
+
+The primary Energy page uses the prototype card hierarchy with explicit estimate
+labels. Its simple forecast line represents only the tested constant-condition
+endpoint, not a weather/leg simulation. Stored kWh is SOC times explicitly
+configured/assessed usable capacity and is labelled estimated. The separate
+non-installed Energy widget covers seven Day/Dusk/Night and loss-of-data states;
+normal installed builds remain fixture-free. Visual work and remaining gates
+are recorded in the [review](design/reviews/prototype-energy-in-progress.md).
+
+## Alpha calibrated input contract
+
+`EnergyConfiguration` adds a live-input wrapper around the tested numerical
+core. The Alpha settings integration also honors shorter per-source freshness
+limits without relaxing the established energy age ceiling. A live calculation requires explicitly configured usable capacity, reserve
+and battery device identity. SOC and measured whole-pack discharge must belong
+to that device. Missing configuration suppresses estimates. Demo remains an
+explicit separate source and is never substituted for live telemetry.
+
+An optional empirical curve uses this UTF-8/ASCII CSV format (the numbers below
+are test examples, not installed boat defaults):
+
+```csv
+OpenNavXPowerCurve,1
+reference,STW
+basis,whole-pack
+speed_kn,power_kw
+2,1
+4,3
+6,9
+```
+
+`reference` is explicitly `STW` or `SOG`. `basis` is `whole-pack`,
+`motor-electrical` or `shaft`. Speeds must increase strictly; two to 512 finite
+positive power points are accepted. The import is bounded to 32 KiB and retains
+its source. Linear interpolation is allowed only inside the measured domain;
+there is no extrapolation. Motor curves require configured hotel power; shaft
+curves additionally require configured efficiency in (0,1]. Neither is guessed.
+The required speed sample must be fresh. The estimate keeps its original time,
+uses SOG for passage duration, and reports its curve/reference/power assumptions.
+This remains a constant-condition advisory estimate, not a leg/weather forecast.
+
+`energy_curve_import` and `energy_live_configuration` cover format/units,
+round-trip import, domain limits, interpolation, STW/SOG distinction, battery
+identity, efficiency/hotel configuration, stale inputs, invalid route states and
+energy shortfall. The [Alpha settings contract](alpha-settings-contract.md)
+connects explicit profile configuration and normalized live inputs to the route,
+energy, diagnostic and advisory consumers. Physical calibration acceptance
+remains a separate boat gate. Existing energy and Demo regressions are retained.
+
+The tested calculation core was implemented after the dual-mode Windows gate
+passed at `c5a0fd0`. Developer Preview consumes it through owned Vessel Data
+snapshots; see the presentation section below and current acceptance in status.
+Linux and native MSVC portable tests pass. Explicit Win32 contracts passed at
+`ae5ed81` and `c2535f5`, matching the approved application ABI; earlier portable
+jobs used the generator default. That earlier nine-contract suite included the energy core and Demo consumer.
+Beta qualification now runs 60 portable suites per platform plus the integrated
+marine/recording/runtime gates; see [Beta 1 acceptance](evidence/beta1-a3e6e08-accepted.json).
+Full integration gates and remaining product work are tracked in
+[project status](status.md).
+
+## Source inspection and boundary
+
+The existing `src/vessel/VesselState.h` distinguishes battery SOC, voltage,
+current and usable capacity from propulsion electrical power. The model
+therefore requires **total net battery discharge including hotel loads**; it
+does not substitute the motor-only power field or invent unmeasured hotel loads.
+No Leaf-specific CAN decoding belongs here or in the UI.
+
+OpenCPN `model/include/model/route.h::m_route_length` is total planned route
+length. `routeman.h::GetCurrentRngToActivePoint` is range to the active waypoint.
+Neither is blindly treated as remaining distance to the destination. The
+accepted read-only route bridge observes the current active-point range plus
+subsequent stored legs after normal OpenCPN progress, preserving pinned geometry
+and coherence rules. `VesselEnergy` accepts that owned snapshot without retaining
+upstream objects. No upstream source is changed for the energy calculation.
+
+## Inputs and assumptions
+
+- Configured capacity C in kWh: deliverable energy across the BMS's reported
+  0–100% SOC interval, with a recorded model source. No default boat capacity.
+- Configured reserve R in percent, required explicitly and bounded 0–100.
+- Fresh SOC S in percent, SOG V in knots and positive total net discharge P in kW.
+- Fresh remaining route distance D in nautical miles for arrival prediction.
+  Without a route, range can still be estimated; arrival stays unavailable.
+- Linear SOC-to-energy relationship, constant current speed and total discharge.
+  No claim to model future wind/current, battery temperature, aging, route-leg
+  speeds, regeneration or propulsion efficiency changes. All results must be
+  presented as estimates with these assumptions inspectable.
+- A configurable low-speed floor defaults to 0.5 kn. Below it, no underway
+  range or passage prediction is returned. Zero/negative net discharge gives no
+  infinite-range claim. These states require a different model, not division by
+  a tiny substitute value.
+
+Inputs use Vessel Data source, validity and receipt-time metadata. Stale,
+uncertain, future-dated, missing, unsourced, nonfinite and out-of-domain inputs
+cannot produce an apparently current result. Fresh explicitly estimated inputs
+are allowed only within this already advisory estimate model. Capacity settings
+are configuration, not a five-second sensor stream. The result retains model
+source and calculation time; a future consumer must recalculate as inputs age.
+
+## Equations
+
+Energy now = C × S / 100 kWh.
+Energy above reserve = C × max(0, S − R) / 100 kWh.
+Endurance above reserve = energy above reserve / P hours.
+Range above reserve = V × endurance nautical miles.
+Passage duration = D / V hours; passage energy = P × duration kWh.
+Arrival SOC = 100 × (energy now − passage energy) / C.
+
+If passage energy exceeds available energy, arrival SOC is unavailable and the
+required extra energy is reported explicitly. It is never a negative physical
+SOC or a fabricated successful 0% arrival. A below-reserve arrival is flagged.
+When D is explicitly zero, fresh current SOC supports a zero-duration arrival
+without needing speed or power. A missing D never takes this shortcut.
+
+## Validation and remaining work
+
+The deterministic fixture uses a **synthetic** 20 kWh pack, 80% SOC, 20% reserve,
+5 kn, 2 kW total discharge and 10 NM passage: 12 kWh above reserve, 6 hours/
+30 NM range, 2-hour passage using 4 kWh, and estimated 60% arrival SOC.
+These values are test data, not the user's vessel configuration.
+
+`energy_prediction_contract` covers reserve boundaries, exhausted energy,
+stationary/charging states, missing/stale/uncertain inputs, invalid domains,
+floating-point limits and conservation/monotonicity across a grid of capacities
+and SOCs. Windows MSVC runs the same portable contract.
+
+Remaining before live vessel energy acceptance: acquire actual battery SOC and
+net discharge with provenance; configure/calibrate usable capacity and reserve;
+validate against recorded and live boat data. The preview supplies the first
+advisory presentation with explicit synthetic inputs, as described below.
+The model has no device control path. Its original core acceptance predates the
+preview presentation described below.
+
+## Historical Developer Preview presentation
+
+The Developer Preview first connected the accepted route snapshot to
+`VesselEnergy` and Route/Energy views. See [the preview contract](developer-preview-contract.md)
+for its freshness/source boundary. That preview used explicit Demo assumptions
+(48 kWh / 15% reserve) and did not yet configure live inputs. Its nine portable
+tests covered valid/stale/missing/high-power/low-SOC/inactive-route/shortfall cases.
+Alpha added explicit live configuration; Beta adds marine input, recording and
+calibration export as described above and below. Physical calibration remains open.
+
+## Beta recording/calibration boundary
+
+The commissioning recorder preserves normalized measurements and energy
+assumptions without renewing sensor times. Its explicit calibration export
+selects STW/SOG, total-pack/motor/shaft basis and device identity, then withholds
+stale, uncertain, incoherent, duplicate, charging and stopped-vessel pairs.
+Measured and derived/estimated pairs retain their source quality; Demo pairs
+remain labelled. Export is for human review, not automatic model installation.
+The existing bounded empirical curve import and advisory model remain the
+prediction boundary. No unmeasured boat curve or usable capacity is supplied.
+See [recording/replay contract](recording-replay-contract.md) for file limits,
+privacy, capture/replay clocks and test gates. Software export/replay/model
+acceptance is recorded in [Beta 1 acceptance](evidence/beta1-a3e6e08-accepted.json); physical calibration remains outstanding.
+
+## Beta input quality and commissioning reasons
+
+Each range/arrival result now identifies its blocking input separately from its
+failure reason: SOC, selected pack identity, SOG, route progress, whole-pack
+consumption, curve/reference speed, auxiliary load or efficiency. A stale SOC
+therefore reports **Battery SOC stale**, rather than an unexplained unavailable
+arrival. Invalid observed inputs remain distinct from never-observed inputs.
+
+Quality describes the inputs, not a statistical forecast guarantee:
+
+* **CURRENT INPUTS**: all required observations are measured and below their
+  aging thresholds. Predictions remain advisory and depend on configured model
+  assumptions.
+* **LIMITED / AGING INPUTS**: an input has crossed its aging threshold but remains
+  within every applicable stale limit.
+* **LIMITED / ESTIMATED INPUTS**: a required input is derived/modelled (including
+  V × I whole-pack power or an empirical propulsion curve).
+* **UNAVAILABLE**: required input/configuration fails the existing gate. No
+  quality label restores a suppressed estimate.
+
+The existing energy equations, capacity/reserve definitions, current sign,
+physical pack identity, zero-distance arrival exception, curve interpolation and
+no-extrapolation rule are preserved. No empirical boat curve is invented.
+Freshness ceilings cannot be relaxed by display reads or source settings. An
+arrival at a coherent zero distance needs current SOC/distance but no underway
+power forecast; its quality reflects those actual dependencies. The route page
+rounds advisory destination SOC to whole percent rather than implying BMS/model
+precision. Field reports and live diagnostics include the blocking input and
+quality. Physical capacity/curve/auxiliary-load validation remains part of boat
+commissioning.
+
+The Beta propulsion page also displays an approximate time to destination from
+the tested arrival prediction's `passage_hours`. It does not introduce a second
+route-distance or passage model in the UI. Missing/invalid required prediction
+inputs suppress this ETA along with arrival SOC; very long unrepresentable
+durations display unavailable. It is a relative estimate at current SOG, not a
+guaranteed clock-time arrival.

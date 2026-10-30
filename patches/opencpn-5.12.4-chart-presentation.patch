@@ -1,0 +1,372 @@
+diff --git i/gui/src/color_handler.cpp w/gui/src/color_handler.cpp
+index dcf8535da..76ad6118b 100644
+--- i/gui/src/color_handler.cpp
++++ w/gui/src/color_handler.cpp
+@@ -1,4 +1,7 @@
+ #include <wx/log.h>
++#ifdef OPENNAV_X
++#include "integration/ChartPresentation.h"
++#endif
+ 
+ #include "color_handler.h"
+ #include "s52plib.h"
+@@ -9,6 +12,13 @@ extern wxColorHashMap* pcurrent_user_color_hash;
+ 
+ wxColour GetGlobalColor(wxString colorName) {
+   wxColour ret_color;
++#ifdef OPENNAV_X
++  extern ColorScheme global_color_scheme;
++  wxColour land, water;
++  if ((colorName == "LANDBACK" || colorName == "BLUEBACK") &&
++      opennav::integration::ChartBackground(global_color_scheme, land, water))
++    return colorName == "LANDBACK" ? land : water;
++#endif
+ 
+   //    Use the S52 Presentation library if present
+   if (ps52plib) ret_color = ps52plib->getwxColour(colorName);
+diff --git i/gui/src/gshhs.cpp w/gui/src/gshhs.cpp
+index 71c4ebd0d..a9b7e6cf6 100644
+--- i/gui/src/gshhs.cpp
++++ w/gui/src/gshhs.cpp
+@@ -57,6 +57,9 @@
+ #endif
+ 
+ #include "gshhs.h"
++#ifdef OPENNAV_X
++#include "integration/ChartPresentation.h"
++#endif
+ #include "chartbase.h"  // for projections
+ #ifdef ocpnUSE_GL
+ #include "shaders.h"
+@@ -122,6 +125,9 @@ GSHHSChart::~GSHHSChart() {
+ }
+ 
+ void GSHHSChart::SetColorScheme(ColorScheme scheme) {
++#ifdef OPENNAV_X
++  if (opennav::integration::ChartBackground(scheme, land, water)) return;
++#endif
+   land = wxColor(170, 175, 80);
+   water = wxColor(170, 195, 240);
+ 
+diff --git i/gui/src/ocpn_frame.cpp w/gui/src/ocpn_frame.cpp
+index 8b7a14403..06c00d515 100644
+--- i/gui/src/ocpn_frame.cpp
++++ w/gui/src/ocpn_frame.cpp
+@@ -101,6 +101,9 @@
+ #include "TCWin.h"
+ #include "cm93.h"
+ #include "color_handler.h"
++#ifdef OPENNAV_X
++#include "integration/ChartPresentation.h"
++#endif
+ #include "compass.h"
+ #include "concanv.h"
+ #include "connections_dlg.h"
+@@ -8035,7 +8038,11 @@ void LoadS57() {
+     b_force_legacy = true;
+   }
+ 
++#ifdef OPENNAV_X
++  ps52plib = opennav::integration::CreateChartPresentation(plib_data, b_force_legacy);
++#else
+   ps52plib = new s52plib(plib_data, b_force_legacy);
++#endif
+ 
+   //  If the library load failed, try looking for the s57 data elsewhere
+ 
+diff --git i/libs/s52plib/src/chartsymbols.cpp w/libs/s52plib/src/chartsymbols.cpp
+index b5a6ec34e..910bda24e 100644
+--- i/libs/s52plib/src/chartsymbols.cpp
++++ w/libs/s52plib/src/chartsymbols.cpp
+@@ -668,7 +668,7 @@ void ChartSymbols::BuildSymbol(ChartSymbol &symbol) {
+ }
+ 
+ bool ChartSymbols::LoadConfigFile(s52plib *plibArg,
+-                                  const wxString &s52ilePath) {
++                                  const wxString &s52ilePath, bool allowCwdOverride) {
+   plib = plibArg;
+ 
+   // Expect to find library data XML file in same folder as other S52 data.
+@@ -681,7 +681,7 @@ bool ChartSymbols::LoadConfigFile(s52plib *plibArg,
+   wxString fullFilePath =
+       configFileDirectory + wxFileName::GetPathSeparator() + xmlFileName;
+ 
+-  if (wxFileName::FileExists(xmlFileName)) {
++  if (allowCwdOverride && wxFileName::FileExists(xmlFileName)) {
+     fullFilePath = xmlFileName;
+     configFileDirectory = _T(".");
+   }
+diff --git i/libs/s52plib/src/chartsymbols.h w/libs/s52plib/src/chartsymbols.h
+index f6261063a..96a02812b 100755
+--- i/libs/s52plib/src/chartsymbols.h
++++ w/libs/s52plib/src/chartsymbols.h
+@@ -154,7 +154,7 @@ class ChartSymbols {
+ public:
+   ChartSymbols(void);
+   ~ChartSymbols(void);
+-  bool LoadConfigFile(s52plib *plibArg, const wxString &path);
++  bool LoadConfigFile(s52plib *plibArg, const wxString &path, bool allowCwdOverride = true);
+ 
+   void InitializeTables(void);
+   void DeleteGlobals(void);
+diff --git i/libs/s52plib/src/s52plib.cpp w/libs/s52plib/src/s52plib.cpp
+index 03dda4915..93d7df531 100755
+--- i/libs/s52plib/src/s52plib.cpp
++++ w/libs/s52plib/src/s52plib.cpp
+@@ -278,7 +278,9 @@ LUPHashIndex *LUPArrayContainer::GetArrayIndexHelper(const char *objectName) {
+ //-----------------------------------------------------------------------------
+ //      s52plib implementation
+ //-----------------------------------------------------------------------------
+-s52plib::s52plib(const wxString &PLib, bool b_forceLegacy) {
++s52plib::s52plib(const wxString &PLib, bool b_forceLegacy, bool allowCwdOverride,
++               bool useS52DefaultTextColor) {
++  m_useS52DefaultTextColor = useS52DefaultTextColor;
+   m_plib_file = PLib;
+ 
+   pOBJLArray = new wxArrayPtrVoid;
+@@ -294,7 +296,7 @@ s52plib::s52plib(const wxString &PLib, bool b_forceLegacy) {
+   m_chartSymbols.SetTextureFormat(GL_TEXTURE_2D);
+   InitializeNatsurHash();
+ 
+-  m_bOK = !(S52_load_Plib(PLib, b_forceLegacy) == 0);
++  m_bOK = !(S52_load_Plib(PLib, b_forceLegacy, allowCwdOverride) == 0);
+ 
+   m_bShowS57Text = false;
+   m_bShowS57ImportantTextOnly = false;
+@@ -1130,7 +1132,7 @@ int s52plib::_LUP2rules(LUPrec *LUP, S57Obj *pObj) {
+     return 0;
+ }
+ 
+-int s52plib::S52_load_Plib(const wxString &PLib, bool b_forceLegacy) {
++int s52plib::S52_load_Plib(const wxString &PLib, bool b_forceLegacy, bool allowCwdOverride) {
+   pAlloc = new wxArrayPtrVoid;
+ 
+   //   Create the Rule Lookup Hash Tables
+@@ -1153,7 +1155,7 @@ int s52plib::S52_load_Plib(const wxString &PLib, bool b_forceLegacy) {
+   m_unused_color.B = 2;
+   m_unused_wxColor.Set(2, 2, 2);
+ 
+-  if (!m_chartSymbols.LoadConfigFile(this, PLib)) {
++  if (!m_chartSymbols.LoadConfigFile(this, PLib, allowCwdOverride)) {
+     wxString msg(_T("Could not load XML PLib symbol file: "));
+     msg += PLib;
+     wxLogMessage(msg);
+@@ -2181,6 +2183,10 @@ bool s52plib::RenderText(wxDC *pdc, S52_TextC *ptext, int x, int y,
+         glEnable(GL_TEXTURE_2D);
+ 
+         wxColour wcolor = GetFontColour_PlugIn(_("ChartTexts"));
++        // XNav's verified presentation follows the software renderer's S-52
++        // default ink. Preserve explicit user colors and stock GL behavior.
++        if (m_useS52DefaultTextColor && wcolor == *wxBLACK)
++          wcolor = wxColour(ptext->pcol->R, ptext->pcol->G, ptext->pcol->B);
+         f_cache->SetColor(wcolor);
+ 
+         /* undo previous rotation to make text level */
+diff --git i/libs/s52plib/src/s52plib.h w/libs/s52plib/src/s52plib.h
+index e830babf2..455f0c0eb 100755
+--- i/libs/s52plib/src/s52plib.h
++++ w/libs/s52plib/src/s52plib.h
+@@ -182,7 +182,8 @@ typedef struct {
+ 
+ class s52plib {
+ public:
+-  s52plib(const wxString &PLib, bool b_forceLegacy = false);
++  s52plib(const wxString &PLib, bool b_forceLegacy = false, bool allowCwdOverride = true,
++          bool useS52DefaultTextColor = false);
+   ~s52plib();
+ 
+   // TODO: SetPPM, SetDisplayWidth etc. should be combined to be set together by pointing them to info about current monitor
+@@ -405,7 +406,8 @@ public:
+   void SetReducedBBox(LLBBox box){ reducedBBox = box;}
+ 
+ private:
+-  int S52_load_Plib(const wxString &PLib, bool b_forceLegacy);
++  bool m_useS52DefaultTextColor = false;
++  int S52_load_Plib(const wxString &PLib, bool b_forceLegacy, bool allowCwdOverride = true);
+   bool S52_flush_Plib();
+ 
+   void PLIB_LoadS57Config();
+diff --git a/gui/include/gui/chcanv.h b/gui/include/gui/chcanv.h
+--- a/gui/include/gui/chcanv.h
++++ b/gui/include/gui/chcanv.h
+@@ -559,6 +559,8 @@
+   void ShowGlobalToolbar();
+ 
+   bool GetShowDepthUnits() { return m_bShowDepthUnits; }
++  // Read-only upstream quilt/single-chart depth-unit resolution.
++  int GetChartDepthUnit();
+   void SetShowDepthUnits(bool show) { m_bShowDepthUnits = show; }
+   bool GetShowGrid() { return m_bDisplayGrid; }
+   void SetShowGrid(bool show) { m_bDisplayGrid = show; }
+diff --git a/gui/src/chcanv.cpp b/gui/src/chcanv.cpp
+--- a/gui/src/chcanv.cpp
++++ b/gui/src/chcanv.cpp
+@@ -72,6 +72,9 @@
+ #include "chartdb.h"
+ #include "chartimg.h"
+ #include "chcanv.h"
++#ifdef OPENNAV_X
++#include "integration/ChartPresentation.h"
++#endif
+ #include "ChInfoWin.h"
+ #include "cm93.h"  // for chart outline draw
+ #include "compass.h"
+@@ -12500,7 +12503,10 @@
+                                                 OVERLAY_OVER_SHIPS);
+   }
+ 
+-  DrawEmboss(dc, EmbossDepthScale());
++#ifdef OPENNAV_X
++  if (!opennav::integration::DrawChartDepthUnit(dc, *this))
++#endif
++    DrawEmboss(dc, EmbossDepthScale());
+   DrawEmboss(dc, EmbossOverzoomIndicator(dc));
+   if (g_pi_manager) {
+     g_pi_manager->RenderAllCanvasOverlayPlugIns(dc, GetVP(), m_canvasIndex,
+@@ -12566,9 +12572,7 @@
+   }
+ }
+ 
+-emboss_data *ChartCanvas::EmbossDepthScale() {
+-  if (!m_bShowDepthUnits) return NULL;
+-
++int ChartCanvas::GetChartDepthUnit() {
+   int depth_unit_type = DEPTH_UNIT_UNKNOWN;
+ 
+   if (GetQuiltMode()) {
+@@ -12595,6 +12599,12 @@
+     }
+   }
+ 
++  return depth_unit_type;
++}
++
++emboss_data *ChartCanvas::EmbossDepthScale() {
++  if (!m_bShowDepthUnits) return NULL;
++  const int depth_unit_type = GetChartDepthUnit();
+   emboss_data *ped = NULL;
+   switch (depth_unit_type) {
+     case DEPTH_UNIT_FEET:
+diff --git a/gui/src/glChartCanvas.cpp b/gui/src/glChartCanvas.cpp
+--- a/gui/src/glChartCanvas.cpp
++++ b/gui/src/glChartCanvas.cpp
+@@ -69,6 +69,9 @@
+ #include "chartdb.h"
+ #include "chartimg.h"
+ #include "chcanv.h"
++#ifdef OPENNAV_X
++#include "integration/ChartPresentation.h"
++#endif
+ #include "ChInfoWin.h"
+ #include "cm93.h"  // for chart outline draw
+ #include "color_handler.h"
+@@ -4530,7 +4533,10 @@
+   }
+ #endif
+ 
+-  DrawEmboss(m_gldc, m_pParentCanvas->EmbossDepthScale());
++#ifdef OPENNAV_X
++  if (!opennav::integration::DrawChartDepthUnit(m_gldc, *m_pParentCanvas))
++#endif
++    DrawEmboss(m_gldc, m_pParentCanvas->EmbossDepthScale());
+   DrawEmboss(m_gldc, m_pParentCanvas->EmbossOverzoomIndicator(gldc));
+ 
+   if (g_pi_manager) {
+diff --git a/gui/include/gui/ocpndc.h b/gui/include/gui/ocpndc.h
+--- a/gui/include/gui/ocpndc.h
++++ b/gui/include/gui/ocpndc.h
+@@ -84,5 +84,8 @@
+   const wxPen &GetPen() const;
+   const wxBrush &GetBrush() const;
+   const wxFont &GetFont() const;
++  wxColour GetTextForeground() const {
++    return dc ? dc->GetTextForeground() : m_textforegroundcolour;
++  }
+ 
+   void GetSize(wxCoord *width, wxCoord *height) const;
+diff --git a/gui/src/chcanv.cpp b/gui/src/chcanv.cpp
+--- a/gui/src/chcanv.cpp
++++ b/gui/src/chcanv.cpp
+@@ -6702,8 +6702,13 @@
+           m_canvas_height / GetContentScaleFactor() - chartbar_height - 5;
+ #endif
+ 
++    int scale_reference_width = m_canvas_width;
++#ifdef OPENNAV_X
++    const bool xnav_scale = opennav::integration::ChartScaleGeometry(
++        *this, x_origin, y_origin, scale_reference_width);
++#endif
+     GetCanvasPixPoint(x_origin, y_origin, blat, blon);
+-    GetCanvasPixPoint(x_origin + m_canvas_width, y_origin, tlat, tlon);
++    GetCanvasPixPoint(x_origin + scale_reference_width, y_origin, tlat, tlon);
+ 
+     double d;
+     ll_gc_ll_reverse(blat, blon, tlat, tlon, 0, &d);
+@@ -6733,6 +6738,10 @@
+     wxPoint r;
+     GetCanvasPointPix(tlat, tlon, &r);
+     int l1 = r.x - x_origin;
++#ifdef OPENNAV_X
++    if (xnav_scale && opennav::integration::DrawChartScale(
++            dc, *this, s, x_origin, y_origin, l1, m_scaleBarRect)) return;
++#endif
+ 
+     m_scaleBarRect = wxRect(x_origin, y_origin - 12, l1,
+                             12);  // Store this for later reference
+diff --git a/gui/src/route_gui.cpp b/gui/src/route_gui.cpp
+--- a/gui/src/route_gui.cpp
++++ b/gui/src/route_gui.cpp
+@@ -45,6 +45,9 @@
+ #include "model/own_ship.h"
+ #include "model/routeman.h"
+ #include "route_gui.h"
++#ifdef OPENNAV_X
++#include "integration/ChartPresentation.h"
++#endif
+ #include "route_point_gui.h"
+ #include "glChartCanvas.h"
+ #include "line_clip.h"
+@@ -121,6 +124,15 @@
+     spen.SetWidth(width);
+     dc.SetPen(spen);
+     dc.SetBrush(*g_pRouteMan->GetActiveRouteBrush());
++#ifdef OPENNAV_X
++    wxColour xnav_ink;
++    if (!m_route.m_bRtIsSelected &&
++        opennav::integration::ChartActiveRouteInk(*canvas, xnav_ink)) {
++      spen.SetColour(xnav_ink);
++      dc.SetPen(spen);
++      dc.SetBrush(wxBrush(xnav_ink));
++    }
++#endif
+   }
+ 
+   wxPoint rpt1, rpt2;
+@@ -364,6 +376,16 @@
+   else
+     dc.SetPen(*g_pRouteMan->GetRoutePen());
+ 
++#ifdef OPENNAV_X
++  wxColour xnav_ink;
++  if (m_route.m_bRtIsActive && !m_route.m_bRtIsSelected &&
++      opennav::integration::ChartActiveRouteInk(*canvas, xnav_ink)) {
++    auto pen = dc.GetPen();
++    pen.SetColour(xnav_ink);
++    dc.SetPen(pen);
++    dc.SetBrush(wxBrush(xnav_ink));
++  }
++#endif
+   RenderSegment(dc, rp1->x, rp1->y, rp2->x, rp2->y, vp, bdraw_arrow);
+ }
+ 
+@@ -430,6 +452,10 @@
+     }
+   }
+ 
++#ifdef OPENNAV_X
++  if (m_route.m_bRtIsActive && !m_route.m_bRtIsSelected)
++    opennav::integration::ChartActiveRouteInk(*canvas, col);
++#endif
+   wxPenStyle style = wxPENSTYLE_SOLID;
+   if (m_route.m_style != wxPENSTYLE_INVALID) style = m_route.m_style;
+   wxPen p = *wxThePenList->FindOrCreatePen(col, width, style);

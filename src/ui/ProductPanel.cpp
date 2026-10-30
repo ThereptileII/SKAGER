@@ -1,0 +1,1030 @@
+#include "ui/ProductPanel.h"
+#include "ui/Sheet.h"
+#include "ui/ContextCard.h"
+#include "ui/PrototypeGeometry.h"
+#include "integration/BuildFeatures.h"
+#include <wx/dcbuffer.h>
+#include <wx/dialog.h>
+#include <wx/textctrl.h>
+#include "vessel/DataItems.h"
+#include "vessel/DisplayItems.h"
+#include <algorithm>
+#include <cmath>
+#include <wx/wrapsizer.h>
+namespace opennav::ui {
+namespace {
+wxString W(const std::string &s) { return wxString::FromUTF8(s); }
+wxString Name(const std::string &name, const std::string &id) {
+  (void)id;
+  return W(name.empty() ? "Unnamed" : name);
+}
+bool ModalOpen() {
+  // GTK's native modal grab need not change wxFrame::IsEnabled(). Inspect the
+  // actual wxDialog lifecycle as well; this also covers other modal editors.
+  for (auto *window : wxTopLevelWindows)
+    if (auto *dialog = dynamic_cast<wxDialog *>(window); dialog && dialog->IsModal())
+      return true;
+  return false;
+}
+const vessel::AisTarget *Target(const ProductState &s, int mmsi) {
+  for (const auto &t : s.ais.targets)
+    if (t.mmsi == mmsi)
+      return &t;
+  return nullptr;
+}
+void Metric(XNavPainter &p, const vessel::Sample &sample, vessel::Time now,
+            int x, int y, int width, const wxString &title, const wxString &unit,
+            int decimals = 1, int size = 36) {
+  const auto a = vessel::Assess(sample, now);
+  const bool stale = a.quality == vessel::Quality::Stale;
+  p.Text(title, x, y, 11, p.c.secondary, false, width);
+  p.Text(a.value && !stale ? wxString::Format("%.*f", decimals, *a.value) : wxString::FromUTF8("—"),
+         x, y + 24, size, stale ? p.c.muted : p.c.primary, false, width);
+  p.Text(unit, x, y + size + 30, 12, p.c.secondary, false, width);
+  if (a.quality != vessel::Quality::Live)
+    p.Text(a.quality == vessel::Quality::Unavailable ? "NO DATA" : W(vessel::QualityName(a.quality)),
+           x, y + size + 50, 11, stale ? p.c.attention : p.c.muted, false, width);
+}
+} // namespace
+ProductPanel::ProductPanel(wxWindow *parent, ProductActions actions)
+    : XNavScroll(parent),
+      actions_(std::move(actions)) {
+  SetScrollRate(0, FromDIP(24));
+  Bind(wxEVT_CHAR_HOOK, [this](wxKeyEvent &event) {
+    auto *focus = wxWindow::FindFocus();
+    if (event.GetKeyCode() == WXK_ESCAPE &&
+        (!focus || (!dynamic_cast<wxTextCtrl *>(focus) &&
+                     wxGetTopLevelParent(focus) == wxGetTopLevelParent(this)))) {
+      CallAfter([this] { Back(); });
+      return;
+    }
+    event.Skip();
+  });
+  Bind(wxEVT_SIZE, [this](wxSizeEvent &e) {
+    const int width = GetClientSize().x;
+    if (width > 0 && width != layout_width_) {
+      layout_width_ = width;
+      for (auto &t : static_text_) {
+        t.first->SetLabel(t.second);
+        t.first->Wrap(std::max(200, width - FromDIP(64)));
+      }
+      RefreshLiveText();
+      for (auto &g : action_grids_)
+        g.sizer->SetCols(std::max(1, std::min(g.columns, width / FromDIP(g.minimum_width + 12))));
+      Layout();
+      FitInside();
+    }
+    if (grid_) {
+      const int cols = GetClientSize().x >= FromDIP(920)   ? 4
+                       : GetClientSize().x >= FromDIP(600) ? 3
+                                                           : 2;
+      if (grid_->GetCols() != cols) {
+        grid_->SetCols(cols);
+        Layout();
+        FitInside();
+      }
+    }
+    e.Skip();
+  });
+}
+void ProductPanel::Back() {
+  ProductPage parent = ProductPage::Home;
+  switch (page_) {
+  case ProductPage::Instruments:
+  case ProductPage::Home: if (actions_.chart) actions_.chart(); return;
+  case ProductPage::RouteDetail: parent = ProductPage::Routes; break;
+  case ProductPage::WaypointDetail: parent = ProductPage::Waypoints; break;
+  case ProductPage::AisDetail: parent = ProductPage::Ais; break;
+  case ProductPage::SourceDetail: case ProductPage::BoatMapping: case ProductPage::SourcesAdvanced: parent = ProductPage::Sources; break;
+  case ProductPage::PilotSettings: parent = ProductPage::Pilot; break;
+  case ProductPage::RailLayout: case ProductPage::InstrumentLayout: parent = ProductPage::Display; break;
+  case ProductPage::EnergySettings: case ProductPage::VesselSettings:
+  case ProductPage::NavigationSettings: case ProductPage::Sources:
+  case ProductPage::Display: case ProductPage::Radar: parent = ProductPage::Settings; break;
+  case ProductPage::Commissioning: case ProductPage::FieldReport: parent = ProductPage::System; break;
+  default: break;
+  }
+  ShowPage(parent, mode_);
+}
+void ProductPanel::Heading(const wxString &title, const wxString &subtitle) {
+  if (first_heading_) {
+    first_heading_ = false;
+    auto *row = new wxBoxSizer(wxHORIZONTAL);
+    auto *back = new XNavIconButton(this, wxID_ANY, XNavIcon::Back, "Back", "Back");
+    back->SetMinSize(FromDIP(wxSize(64, 48)));
+    back->SetLightMode(mode_);
+    back->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { CallAfter([this] { Back(); }); });
+    row->Add(back, 0, wxRIGHT, FromDIP(16));
+    auto *label = new wxStaticText(this, wxID_ANY, title);
+    label->SetFont(UiFont(*this, 28));
+    label->SetForegroundColour(Colour(Theme(mode_).primary));
+    EnableScrollGesture(*label);
+    row->Add(label, 1, wxALIGN_CENTER_VERTICAL);
+    body_->Add(row, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(16));
+    if (!subtitle.empty()) Text(subtitle, 13);
+  } else {
+    Text(title, 22);
+    if (!subtitle.empty()) Text(subtitle, 13);
+  }
+}
+void ProductPanel::Visual(const wxString &name, int height,
+                          std::function<void(XNavPainter &, wxDC &, int)> draw) {
+  auto *panel = new wxPanel(this);
+  panel->SetName(name);
+  panel->SetMinSize(FromDIP(wxSize(280, height)));
+  panel->SetBackgroundStyle(wxBG_STYLE_PAINT);
+  EnableScrollGesture(*panel);
+  panel->Bind(wxEVT_PAINT, [this, panel, draw](wxPaintEvent &) {
+    wxAutoBufferedPaintDC dc(panel);
+    dc.SetBackground(wxBrush(Colour(Theme(mode_).background)));
+    dc.Clear();
+    XNavPainter painter(*panel, dc, mode_);
+    draw(painter, dc, panel->ToDIP(panel->GetClientSize().x));
+  });
+  body_->Add(panel, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(16));
+  visuals_.push_back(panel);
+}
+void ProductPanel::Text(const wxString &text, int size) {
+  auto *label = new wxStaticText(this, wxID_ANY, text);
+  EnableScrollGesture(*label);
+  label->SetFont(UiFont(*this, size));
+  label->SetForegroundColour(
+      Colour(size > 18 ? Theme(mode_).primary : Theme(mode_).secondary));
+  static_text_.push_back({label, text});
+  label->Wrap(std::max(200, GetClientSize().x - FromDIP(64)));
+  body_->Add(label, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(16));
+}
+void ProductPanel::LiveText(
+    std::function<wxString(const ProductState &)> text) {
+  const auto raw = text(state_);
+  const int width = std::max(200, GetClientSize().x - FromDIP(64));
+  auto *label = new wxStaticText(this, wxID_ANY, raw);
+  EnableScrollGesture(*label);
+  label->SetFont(UiFont(*this, 14));
+  label->Wrap(width);
+  label->SetForegroundColour(Colour(Theme(mode_).secondary));
+  body_->Add(label, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(16));
+  text_.push_back({label, std::move(text), raw, width, label->GetFont(), label->GetDPI()});
+}
+bool ProductPanel::RefreshLiveText() {
+  const int width = std::max(200, GetClientSize().x - FromDIP(64));
+  bool changed = false;
+  for (auto &entry : text_) {
+    const auto raw = entry.value(state_);
+    const auto font = entry.label->GetFont();
+    const auto dpi = entry.label->GetDPI();
+    // wxStaticText::Wrap inserts newlines into GetLabel(). Compare the source
+    // value, never the wrapped output, and reflow on width changes as well.
+    if (raw == entry.raw && width == entry.wrap_width &&
+        font == entry.font && dpi == entry.dpi) continue;
+    entry.raw = raw;
+    entry.wrap_width = width;
+    entry.font = font;
+    entry.dpi = dpi;
+    entry.label->SetLabel(raw);
+    entry.label->Wrap(width);
+    changed = true;
+  }
+  return changed;
+}
+XNavButton *ProductPanel::StatusAction(const wxString &title,
+    std::function<wxString(const ProductState &)> status, std::function<void()> action) {
+  auto text = [title, status](const ProductState &state) { return title + W("  ·  ") + status(state); };
+  auto *button = Action(text(state_), std::move(action));
+  button->SetRole(ButtonRole::Quiet);
+  button->SetMinSize(FromDIP(wxSize(200, 64)));
+  button_text_.push_back({button, std::move(text)});
+  return button;
+}
+XNavButton *ProductPanel::Action(const wxString &label,
+                                 std::function<void()> action, bool enabled) {
+  auto *button = new XNavButton(this, wxID_ANY, label, label);
+  button->SetMinSize(FromDIP(wxSize(actions_grid_ ? action_width_ : 200, 52)));
+  button->SetLightMode(mode_);
+  button->Enable(enabled && static_cast<bool>(action));
+  button->Bind(wxEVT_BUTTON,
+               [this, action = std::move(action)](wxCommandEvent &) {
+                 CallAfter([action] {
+                   if (action)
+                     action();
+                 });
+               });
+  if (actions_grid_)
+    actions_grid_->Add(button, 1, wxEXPAND);
+  else
+    body_->Add(button, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(8));
+  return button;
+}
+void ProductPanel::Value(
+    const wxString &title, const wxString &unit,
+    std::function<vessel::Sample(const ProductState &)> value, int decimals) {
+  if (!grid_) {
+    grid_ = new wxGridSizer(3, FromDIP(12), FromDIP(12));
+    body_->Add(grid_, 0, wxEXPAND | wxALL, FromDIP(16));
+  }
+  auto *v = new XNavDataValue(this, title, unit, decimals);
+  v->SetLightMode(mode_);
+  v->SetMinSize(FromDIP(wxSize(180, 126)));
+  v->SetReading(value(state_), state_.now);
+  grid_->Add(v, 1, wxEXPAND);
+  values_.push_back({v, std::move(value)});
+}
+void ProductPanel::BeginActions(int columns, int minimum_width) {
+  action_width_ = minimum_width;
+  actions_grid_ = new wxGridSizer(
+      std::max(1, std::min(columns, GetClientSize().x / FromDIP(minimum_width + 12))),
+      FromDIP(8), FromDIP(8));
+  action_grids_.push_back({actions_grid_, columns, minimum_width});
+  body_->Add(actions_grid_, 0, wxEXPAND | wxALL, FromDIP(16));
+}
+void ProductPanel::Result(application::CommandResult result) {
+  if (result.ok && !result.identity.empty()) {
+    if (page_ == ProductPage::RouteDetail)
+      ShowObject(result.identity, true, mode_);
+    else if (page_ == ProductPage::WaypointDetail ||
+             page_ == ProductPage::Waypoints)
+      ShowObject(result.identity, false, mode_);
+  }
+  notice_->Show();
+  notice_->SetLabel(W(result.message));
+  notice_->SetForegroundColour(
+      Colour(result.ok ? Theme(mode_).healthy : Theme(mode_).attention));
+  notice_->Wrap(std::max(200, GetClientSize().x - FromDIP(48)));
+  Layout();
+  FitInside();
+}
+std::string ProductPanel::PageTitle() const {
+  switch (page_) {
+  case ProductPage::Commissioning:
+    return "Commissioning & recordings";
+  case ProductPage::Alerts:
+    return "Alerts";
+  case ProductPage::System:
+    return "System";
+  case ProductPage::NavigationSettings: return "Navigation settings";
+  case ProductPage::BoatMapping: return "Motor & battery setup";
+  case ProductPage::SourcesAdvanced: return "Advanced source details";
+  case ProductPage::SourceHealth: return "Source health";
+  case ProductPage::FieldReport:
+    return "Field diagnostic bundle";
+  case ProductPage::Home:
+    return "Menu";
+  case ProductPage::Routes:
+    return "Routes";
+  case ProductPage::Waypoints:
+    return "Waypoints";
+  case ProductPage::RouteDetail:
+    return "Route detail";
+  case ProductPage::WaypointDetail:
+    return "Waypoint detail";
+  case ProductPage::Ais:
+    return "AIS targets";
+  case ProductPage::AisDetail:
+    return "AIS target";
+  case ProductPage::Instruments:
+    return "Vessel instruments";
+  case ProductPage::Advice:
+    return "SmartNav";
+  case ProductPage::Pilot:
+    return "Manual autopilot";
+  case ProductPage::PilotSettings:
+    return "Autopilot configuration";
+  case ProductPage::Anchor:
+    return "Anchor watch";
+  case ProductPage::Display:
+    return "Display";
+  case ProductPage::RailLayout:
+    return "Data rail layout";
+  case ProductPage::InstrumentLayout:
+    return "Instrument layout";
+  case ProductPage::Settings:
+    return "Settings";
+  case ProductPage::EnergySettings:
+    return "Energy configuration";
+  case ProductPage::Sources:
+    return "Data Sources";
+  case ProductPage::SourceDetail:
+    return "Source selection";
+  case ProductPage::VesselSettings:
+    return "Vessel safety settings";
+  case ProductPage::Radar:
+    return "Radar status";
+  }
+  return "Unknown";
+}
+void ProductPanel::ShowPage(ProductPage page, LightMode mode) {
+  if(page==ProductPage::Alerts&&actions_.alerts){actions_.alerts();return;}
+  if(page==ProductPage::Pilot&&actions_.pilot_controls){actions_.pilot_controls();return;}
+  if(page==ProductPage::Anchor&&actions_.anchor_watch){actions_.anchor_watch();return;}
+  if ((page == ProductPage::Home || page == ProductPage::Settings) && actions_.preferences) {
+    actions_.preferences();
+    return;
+  }
+  if (page != page_) pilot_advanced_ = false;
+  page_ = page;
+  mode_ = mode;
+  rebuild_pending_ = false;
+  if (actions_.page_changed) actions_.page_changed(page);
+  Scroll(0, 0);
+  Build();
+  if (IsShownOnScreen()) SetFocus();
+}
+int ProductPanel::MinimumValueHeight() const {
+  int minimum = instruments_ ? prototype::instrument_tile_height : 0;
+  for (const auto &v : values_) {
+    const int height = ToDIP(v.first->GetClientSize().y);
+    if (!minimum || height < minimum) minimum = height;
+  }
+  for (auto *panel : visuals_) {
+    const int height = ToDIP(panel->GetClientSize().y) - 48;
+    if (height > 0 && (!minimum || height < minimum)) minimum = height;
+  }
+  return minimum;
+}
+std::vector<ProductGeometry> ProductPanel::ControlGeometry() const {
+  std::vector<ProductGeometry> out;
+  if (instruments_)
+    for (auto *child : instruments_->Controls()) {
+      const auto r = child->GetScreenRect();
+      out.push_back({child->GetLabel().ToStdString(wxConvUTF8), r, child->IsEnabled(),
+          IsShownOnScreen() && child->IsShownOnScreen() && GetScreenRect().Contains(r)});
+    }
+  if (radar_)
+    for (auto *child : radar_->Controls()) {
+      const auto r = child->GetScreenRect();
+      bool visible = IsShownOnScreen() && child->IsShownOnScreen();
+      for (auto *parent = child->GetParent(); parent && visible;
+           parent = parent->GetParent()) {
+        visible = parent->GetScreenRect().Contains(r);
+        if (parent == this) break;
+      }
+      out.push_back({child->GetLabel().ToStdString(wxConvUTF8), r,
+                     child->IsEnabled(), visible});
+    }
+  for (auto *child : GetChildren()) {
+    if (!dynamic_cast<XNavButton *>(child)) continue;
+    const auto rectangle = child->GetScreenRect();
+    out.push_back({child->GetLabel().ToStdString(wxConvUTF8), rectangle,
+                   child->IsEnabled(), IsShownOnScreen() && child->IsShownOnScreen() &&
+                   GetScreenRect().Contains(rectangle)});
+  }
+  return out;
+}
+std::vector<ProductGeometry> ProductPanel::RegionGeometry() const {
+  std::vector<ProductGeometry> out;
+  if (instruments_)
+    for (const auto &region : instruments_->Regions()) {
+      const auto r = wxRect(instruments_->ClientToScreen(FromDIP(region.second.GetPosition())),
+                            FromDIP(region.second.GetSize()));
+      out.push_back({region.first.ToStdString(wxConvUTF8), r, true,
+          IsShownOnScreen() && GetScreenRect().Contains(r)});
+    }
+  if(radar_)
+    for(const auto &region:radar_->Regions()) {
+      const auto r=wxRect(radar_->ClientToScreen(FromDIP(region.second.GetPosition())),FromDIP(region.second.GetSize()));
+      out.push_back({region.first.ToStdString(wxConvUTF8),r,true,IsShownOnScreen()&&GetScreenRect().Contains(r)});
+    }
+  for (auto *panel : visuals_) {
+    const auto rectangle = panel->GetScreenRect();
+    out.push_back({panel->GetName().ToStdString(wxConvUTF8), rectangle, true,
+                   IsShownOnScreen() && panel->IsShownOnScreen() &&
+                   GetScreenRect().Contains(rectangle)});
+  }
+  return out;
+}
+void ProductPanel::ShowAis(int mmsi, LightMode mode) {
+  mmsi_ = mmsi;
+  ShowPage(ProductPage::AisDetail, mode);
+}
+void ProductPanel::ShowObject(const std::string &id, bool route,
+                              LightMode mode) {
+  if (route) {
+    route_ = {};
+    route_.id = id;
+    route_available_ = false;
+    RefreshRoute();
+    ShowPage(ProductPage::RouteDetail, mode);
+    return;
+  }
+  point_ = {};
+  point_.id = id;
+  point_available_ = false;
+  RefreshWaypoint();
+  ShowPage(ProductPage::WaypointDetail, mode);
+}
+bool ProductPanel::RefreshRoute() {
+  route_refreshed_at_ = std::chrono::steady_clock::now();
+  const auto current = actions_.navigation.route
+      ? actions_.navigation.route(route_.id) : std::nullopt;
+  const bool changed = route_available_ != current.has_value() ||
+      (current && current->revision != route_.revision);
+  route_available_ = current.has_value();
+  if (current) route_ = *current;
+  return changed;
+}
+bool ProductPanel::RefreshWaypoint() {
+  point_refreshed_at_ = std::chrono::steady_clock::now();
+  const auto current = actions_.navigation.waypoint_context
+      ? actions_.navigation.waypoint_context(point_.id, point_refreshed_at_)
+      : application::WaypointContext{};
+  const auto &p = current.waypoint;
+  const bool valid = p && std::isfinite(p->latitude_deg) && std::isfinite(p->longitude_deg) &&
+      std::abs(p->latitude_deg) <= 90 && std::abs(p->longitude_deg) <= 180;
+  const auto usable = [&](const vessel::Sample &sample) {
+    const auto assessment = vessel::Assess(sample, point_refreshed_at_);
+    return assessment.value && (assessment.quality == vessel::Quality::Live ||
+        assessment.quality == vessel::Quality::Aging || assessment.quality == vessel::Quality::Estimated);
+  };
+  const bool go = valid && p->editable && usable(current.range_nm) && usable(current.bearing_true_deg);
+  const bool changed = point_available_ != p.has_value() ||
+      (p && p->revision != point_.revision) || point_position_valid_ != valid || point_can_go_ != go;
+  point_available_ = p.has_value();
+  point_position_valid_ = valid;
+  point_can_go_ = go;
+  if (p) point_ = *p;
+  return changed;
+}
+void ProductPanel::Update(const ProductState &state, LightMode mode) {
+  const bool light_changed = mode != mode_;
+  const bool mode_changed = state_.vessel.replayed != state.vessel.replayed ||
+                            state_.vessel.simulated != state.vessel.simulated;
+  bool alerts_changed = state_.alerts.size() != state.alerts.size();
+  if (!alerts_changed)
+    for (std::size_t i = 0; i < state.alerts.size(); ++i)
+      alerts_changed |= state_.alerts[i].episode != state.alerts[i].episode ||
+                        state_.alerts[i].acknowledged != state.alerts[i].acknowledged;
+  state_ = state;
+  rebuild_pending_ |= (light_changed && !radar_) || mode_changed ||
+      (page_ == ProductPage::Alerts && alerts_changed);
+  mode_ = mode;
+  if (radar_) {
+    // This native component owns its complete theme transition. Keep its
+    // scroll/paint surfaces alive instead of destroying them mid-transition.
+    radar_->Update(state_.radar, state_.now, state_.vessel.replayed, mode_);
+    if (light_changed) {
+      SetBackgroundColour(Colour(Theme(mode_).background));
+      Refresh(false);
+    }
+  }
+  // Sheets are stack-owned modal children. DestroyChildren during ShowModal
+  // would destroy their lifetime; retain ALL pending rebuild causes instead.
+  auto *frame = wxGetTopLevelParent(this);
+  if ((frame && !frame->IsEnabled()) || ModalOpen()) return;
+  if (page_ == ProductPage::RouteDetail && IsShownOnScreen() &&
+      std::chrono::steady_clock::now() - route_refreshed_at_ >= std::chrono::seconds(1))
+    rebuild_pending_ |= RefreshRoute();
+  if (page_ == ProductPage::WaypointDetail && IsShownOnScreen() &&
+      std::chrono::steady_clock::now() - point_refreshed_at_ >= std::chrono::seconds(1))
+    rebuild_pending_ |= RefreshWaypoint();
+  if (rebuild_pending_) {
+    auto *focus=wxWindow::FindFocus();
+    const bool restore_focus=focus && (focus==this || IsDescendant(focus));
+    const auto scroll = GetViewStart();
+    rebuild_pending_ = false;
+    Build();
+    Scroll(scroll);
+    if((restore_focus || mode_changed) && IsShownOnScreen())SetFocus();
+  }
+  for (auto &button : button_text_) button.first->SetLabel(button.second(state));
+  if (instruments_) {
+    const auto size = instruments_->GetMinSize();
+    instruments_->Update(state.vessel, state.settings.instruments, state.now, mode);
+    if (size != instruments_->GetMinSize()) { Layout(); FitInside(); }
+  }
+  for (auto *visual : visuals_) visual->Refresh(false);
+  for (auto &v : values_)
+    v.first->SetReading(v.second(state), state.now);
+  if (RefreshLiveText()) {
+    Layout();
+    FitInside();
+  }
+}
+void ProductPanel::CreateMark() {
+  if (!actions_.navigation.chart_position)
+    return;
+  auto location = actions_.navigation.chart_position();
+  if (!location) {
+    Result({false, "Chart position unavailable", {}});
+    return;
+  }
+  auto fields = EditSheet(
+      *this, mode_, "Create waypoint",
+      wxString::Format("At chart center %.6f, %.6f. Saves a real OpenCPN mark.",
+                       location->latitude_deg, location->longitude_deg),
+      {{"Name", "New waypoint", 128}, {"Description", "", 2048}},
+      "Create waypoint");
+  if (fields && actions_.navigation.create_waypoint)
+    Result(actions_.navigation.create_waypoint(*location, (*fields)[0],
+                                               (*fields)[1]));
+}
+void ProductPanel::RouteActions() {
+  if (!route_available_) {
+    Heading("Route unavailable", "The selected route was removed or cannot be identified.");
+    Action("Back to routes", [this] { ShowPage(ProductPage::Routes, mode_); });
+    return;
+  }
+  // Freeze what the human saw when these controls were built. Neither a timer
+  // refresh nor a modal event loop may retarget a queued command.
+  const auto selected = route_;
+  Heading(Name(route_.name, route_.id),
+          route_.active
+              ? "Active passage"
+              : "Saved route");
+  Visual("Passage overview", 168, [this](XNavPainter &p, wxDC &, int width) {
+    const int split = width / 2;
+    p.Card(0, 0, width, 164, "DESTINATION");
+    p.Text(route_.points.empty() ? wxString("No destination")
+                                : Name(route_.points.back().name, ""),
+           20, 48, 28, p.c.primary, false, split - 40);
+    p.Text(wxString::Format("%u waypoints", static_cast<unsigned>(route_.points.size())),
+           20, 98, 14, p.c.secondary, false, split - 40);
+    const auto progress = state_.vessel.navigation.route;
+    const bool same = progress && progress->route_id == route_.id;
+    const auto distance = same ? vessel::AssessRoute(*progress, state_.now).remaining_distance_nm
+                               : std::nullopt;
+    if (route_.active) {
+      p.Text("REMAINING", split + 20, 16, 12, p.c.secondary, false, split - 40);
+      p.Text(distance ? wxString::Format("%.1f NM", *distance) : wxString::FromUTF8("—"),
+             split + 20, 48, 36, distance ? p.c.accent : p.c.muted, false, split - 40);
+      wxString next = "Navigation distance unavailable";
+      if (distance && !progress->remaining_steps.empty())
+        next = "Next: " + Name(progress->remaining_steps.front().name, "");
+      p.Text(next, split + 20, 104, 14, p.c.secondary, false, split - 40);
+      if (distance && state_.advice.route_valid && state_.advice.route_id == progress->route_id &&
+          state_.advice.route_revision == progress->route_revision &&
+          state_.advice.revision_scope == progress->revision_scope)
+        for (const auto &event : state_.advice.events)
+          if (event.kind == smartnav::EventKind::Destination && event.seconds_from_now &&
+              std::isfinite(*event.seconds_from_now) && *event.seconds_from_now >= 0)
+            p.Text(wxString::Format("Estimated %.0f min to destination", *event.seconds_from_now / 60),
+                   split + 20, 132, 12, p.c.secondary, false, split - 40);
+    } else {
+      p.Text("DEPARTURE", split + 20, 16, 12, p.c.secondary, false, split - 40);
+      p.Text(route_.points.empty() ? wxString::FromUTF8("—")
+                                  : Name(route_.points.front().name, ""),
+             split + 20, 48, 28, p.c.primary, false, split - 40);
+      p.Text("Review the chart before activation", split + 20, 104, 14,
+             p.c.secondary, false, split - 40);
+    }
+  });
+  BeginActions(2);
+  Action("View first point on chart", [this, selected] {
+    if (actions_.chart)
+      actions_.chart();
+    if (actions_.navigation.view_route)
+      actions_.navigation.view_route(selected.id);
+  }, static_cast<bool>(actions_.navigation.view_route))->SetRole(ButtonRole::Quiet);
+  auto *navigate = Action(
+      route_.active ? "Stop navigation" : "Activate route",
+      [this, selected] {
+        if (ConfirmSheet(
+                *this, mode_,
+                selected.active ? "Stop navigation" : "Activate route",
+                "This changes OpenCPN navigation. Existing configured OpenCPN "
+                "output connections retain their normal behavior.",
+                selected.active ? "Stop navigation" : "Activate"))
+          Result(selected.active ? actions_.navigation.deactivate(selected)
+                                  : actions_.navigation.activate(selected));
+      },
+      !state_.vessel.simulated && !state_.vessel.replayed &&
+          (route_.active ? static_cast<bool>(actions_.navigation.deactivate)
+                         : route_.editable && static_cast<bool>(actions_.navigation.activate)));
+  navigate->SetRole(route_.active ? ButtonRole::Critical : ButtonRole::Primary);
+  EndActions();
+  Text("Planned legs", 20);
+  if (route_.points.empty()) Text("No waypoints in this route.");
+  for (std::size_t i = 0; i < route_.points.size(); ++i) {
+    const auto point = route_.points[i];
+    Visual("Planned leg " + wxString::Format("%u", static_cast<unsigned>(i + 1)), 80,
+        [this, point, i](XNavPainter &p, wxDC &, int width) {
+      const auto progress = state_.vessel.navigation.route;
+      const bool next = route_.active && progress && progress->route_id == route_.id &&
+          vessel::AssessRoute(*progress, state_.now).remaining_distance_nm &&
+          progress->active_waypoint_id == point.id;
+      p.Text(wxString::Format("%02u", static_cast<unsigned>(i + 1)), 8, 8, 20,
+             next ? p.c.accent : p.c.secondary);
+      p.Text(Name(point.name, ""), 60, 8, 21, p.c.primary, false, width - 170);
+      if (next) p.Text("NEXT", width - 72, 12, 12, p.c.accent);
+      wxString detail = "Departure";
+      if (i > 0) {
+        detail = point.incoming_nm && std::isfinite(*point.incoming_nm) && *point.incoming_nm >= 0
+            ? wxString::Format("%.2f NM", *point.incoming_nm) : wxString("Leg distance unavailable");
+        if (point.incoming_course_true_deg && std::isfinite(*point.incoming_course_true_deg))
+          detail += wxString::Format(W("  /  %.0f° true"), *point.incoming_course_true_deg);
+      }
+      p.Text(detail, 60, 40, 14, p.c.secondary, false, width - 84);
+      p.Rule(60, 72, width - 84);
+    });
+  }
+  Text("Route options", 18);
+  BeginActions(3);
+  Action(
+      "Edit route name / description",
+      [this, selected] {
+        auto f = EditSheet(*this, mode_, "Edit route",
+                           "Change the saved route name and description.",
+                           {{"Name", W(selected.name), 128},
+                            {"Description", W(selected.description), 2048}});
+        if (f)
+          Result(actions_.navigation.edit_route(selected, (*f)[0], (*f)[1]));
+      },
+      route_.editable && static_cast<bool>(actions_.navigation.edit_route))->SetRole(ButtonRole::Quiet);
+  Action(
+      "Edit route points on chart",
+      [this, selected] {
+        if (ConfirmSheet(
+                *this, mode_, "Edit route geometry",
+                "Drag the route's points on the chart using OpenCPN's "
+                "normal editing behavior. Shared points can affect more "
+                "than one route. Inspect the planned legs before activation.",
+                "Open chart")) {
+          if (actions_.chart)
+            actions_.chart();
+          if (actions_.navigation.view_route)
+            actions_.navigation.view_route(selected.id);
+        }
+      },
+      route_.editable && static_cast<bool>(actions_.navigation.view_route))->SetRole(ButtonRole::Quiet);
+  Action(
+      "Reverse route",
+      [this, selected] {
+        if (ConfirmSheet(*this, mode_, "Reverse route",
+                         "Reverse planned leg order; waypoint names are "
+                         "retained. Navigation must be inactive.",
+                         "Reverse"))
+          Result(actions_.navigation.reverse(selected));
+      },
+      route_.editable && static_cast<bool>(actions_.navigation.reverse))->SetRole(ButtonRole::Quiet);
+  EndActions();
+  Action("Back to routes", [this] { ShowPage(ProductPage::Routes, mode_); })->SetRole(ButtonRole::Quiet);
+}
+void ProductPanel::PointActions() {
+  if (!point_available_) {
+    Heading("Waypoint unavailable", "This waypoint was removed or cannot be uniquely identified.");
+    Action("Back to waypoints", [this] { ShowPage(ProductPage::Waypoints, mode_); });
+    return;
+  }
+  Heading(Name(point_.name, point_.id),
+          point_position_valid_ ? wxString::Format("%.5f, %.5f", point_.latitude_deg,
+                           point_.longitude_deg) : wxString("Position unavailable"));
+  Text(W(point_.description));
+  if (!point_can_go_)
+    Text(point_.editable ? "GO TO needs a current vessel position." : "This waypoint is read-only here.");
+  const auto selected = point_;
+  const bool live = !state_.vessel.simulated && !state_.vessel.replayed;
+  const auto command = [this, selected](ContextAction action) {
+    RefreshWaypoint();
+    if (!point_available_ || point_.revision != selected.revision ||
+        (action == ContextAction::GoTo && !point_can_go_) ||
+        state_.vessel.simulated || state_.vessel.replayed) {
+      ShowObject(selected.id, false, mode_);
+      Result({false, "Waypoint or position changed. Review before continuing."});
+      return;
+    }
+    // Own the rendered intent across the modal. Integration checks this exact
+    // revision again after confirmation; the timer never rebuilds a live sheet.
+    const auto result = WaypointSheet(*this, mode_, action, selected, actions_.navigation);
+    if (!result) return;
+    if (action == ContextAction::GoTo && result->ok && actions_.chart) actions_.chart();
+    else {
+      ShowObject(selected.id, false, mode_);
+      Result(*result);
+    }
+  };
+  BeginActions(2);
+  Action("Back to waypoints",
+         [this] { ShowPage(ProductPage::Waypoints, mode_); });
+  Action("View on chart", [this, selected] {
+    const auto result = actions_.navigation.view_waypoint(selected.id);
+    if (result.ok && actions_.chart) actions_.chart();
+    else Result(result);
+  }, point_position_valid_ && static_cast<bool>(actions_.navigation.view_waypoint));
+  Action("GO TO", [command] { command(ContextAction::GoTo); },
+      live && point_can_go_ && static_cast<bool>(actions_.navigation.go_to_waypoint))->SetRole(ButtonRole::Primary);
+  Action("Edit waypoint", [command] { command(ContextAction::Edit); },
+      live && point_.editable && static_cast<bool>(actions_.navigation.edit_waypoint));
+  Action("Delete waypoint", [command] { command(ContextAction::Remove); },
+      live && point_.removable && static_cast<bool>(actions_.navigation.delete_waypoint));
+}
+void ProductPanel::Instruments() {
+  instruments_ = new XNavInstrumentPanel(this);
+  instruments_->on_close = actions_.chart;
+  instruments_->on_rail = [this] { ShowPage(ProductPage::RailLayout, mode_); };
+  instruments_->on_health = [this] { ShowPage(ProductPage::Sources, mode_); };
+  instruments_->on_configure = [this] { ShowPage(ProductPage::InstrumentLayout, mode_); };
+  const auto config = actions_.settings ? actions_.settings() : state_.settings;
+  instruments_->Update(state_.vessel, config.instruments, state_.now, mode_);
+  body_->Add(instruments_, 0, wxEXPAND);
+}
+void ProductPanel::Build() {
+  Freeze();
+  first_heading_ = true;
+  visuals_.clear();
+  button_text_.clear();
+  text_.clear();
+  static_text_.clear();
+  action_grids_.clear();
+  values_.clear();
+  instruments_ = nullptr;
+  radar_ = nullptr;
+  grid_ = nullptr;
+  actions_grid_ = nullptr;
+  DestroyChildren();
+  if (GetSizer())
+    SetSizer(nullptr);
+  body_ = new wxBoxSizer(wxVERTICAL);
+  SetSizer(body_);
+  SetBackgroundColour(Colour(Theme(mode_).background));
+  if (page_ != ProductPage::Instruments && page_ != ProductPage::Radar) body_->AddSpacer(FromDIP(20));
+  notice_ = new wxStaticText(this, wxID_ANY, "");
+  notice_->SetFont(UiFont(*this, 14, true));
+  body_->Add(notice_, 0, wxEXPAND | wxALL, FromDIP(12));
+  notice_->Hide();
+  SetName("OpenNav product page");
+  SetLabel("OpenNav product page: " + W(PageTitle()));
+  if (page_ == ProductPage::Alerts) {
+    Heading("Alerts", "Open the notification centre from the status bar.");
+  } else if (page_ == ProductPage::System) {
+    Heading("System", "Interface, recovery and diagnostics");
+    BeginActions(2);
+    Action("Open Legacy OpenCPN",actions_.legacy);
+    Action("Restart XNav",actions_.restart_xnav);
+    Action("Safe Mode",actions_.safe);
+    Action("Diagnostics",actions_.diagnostics);
+    Action("Open diagnostics folder",actions_.diagnostics_folder);
+    Action("Commissioning & recordings",[this]{ShowPage(ProductPage::Commissioning,mode_);});
+    Action("Export diagnostic bundle",[this]{ShowPage(ProductPage::FieldReport,mode_);});
+    Action("Advanced / Legacy Settings",actions_.navigation.legacy_settings);
+    EndActions();
+    Text("Legacy and Safe use the same navigation data and charts. Switching interface saves your work and restarts the application.");
+  } else if (page_ == ProductPage::FieldReport) {
+    FieldReportPanel();
+  } else if (page_ == ProductPage::Commissioning) {
+    CommissioningPanel();
+  } else if (page_ == ProductPage::Home) {
+    Heading("Navigate with OpenNav X", "Beta / Chart, vessel and passage");
+    BeginActions(3);
+    for (const auto &p : std::vector<std::pair<wxString, ProductPage>>{
+             {"Routes", ProductPage::Routes},
+             {"Waypoints", ProductPage::Waypoints},
+             {"AIS targets", ProductPage::Ais},
+             {"Vessel instruments", ProductPage::Instruments},
+             {"SmartNav advisories", ProductPage::Advice},
+             {"Manual autopilot", ProductPage::Pilot},
+             {"Anchor watch", ProductPage::Anchor},
+             {"Alerts", ProductPage::Alerts},
+             {"Settings", ProductPage::Settings}})
+      Action(p.first, [this, p] { ShowPage(p.second, mode_); });
+    Action("Propulsion & energy", actions_.energy);
+    Action("System & diagnostics",
+           [this] { ShowPage(ProductPage::System, mode_); });
+  } else if (page_ == ProductPage::Routes || page_ == ProductPage::Waypoints) {
+    const bool routes = page_ == ProductPage::Routes;
+    wxString source_note = state_.vessel.replayed ? "REPLAY / Saved routes and waypoints are read-only" : "Saved passages and places";
+#if XNAV_ENABLE_TEST_FIXTURES
+    if (state_.vessel.simulated && !state_.vessel.replayed) source_note = "DEMO telemetry / REAL saved routes and waypoints";
+#endif
+    Heading(routes ? "Routes" : "Waypoints", source_note);
+    BeginActions(2);
+    Action("Refresh catalog", [this] { Build(); });
+    Action(routes ? "Waypoints" : "Routes", [this, routes] {
+      ShowPage(routes ? ProductPage::Waypoints : ProductPage::Routes, mode_);
+    });
+    if (routes) {
+      Action("Current passage", actions_.route_summary);
+      Action("Create route on chart", [this] {
+        if (actions_.chart) actions_.chart();
+        if (actions_.navigation.start_route) actions_.navigation.start_route();
+      });
+    } else
+      Action("Create waypoint at chart center", [this] { CreateMark(); });
+    EndActions();
+    if (actions_.navigation.catalog) {
+      auto catalog = actions_.navigation.catalog();
+      if (catalog.truncated)
+        Text("Catalog capped; use Advanced route manager for remaining "
+             "objects.");
+      if (routes) {
+        if (catalog.routes.empty())
+          Text("No routes saved. Create a route or import GPX using Advanced "
+               "route manager.");
+        for (const auto &r : catalog.routes)
+          Action(Name(r.name, r.id) +
+                     wxString::Format(" / %u points",
+                                      static_cast<unsigned>(r.points.size())) +
+                     (r.active ? " / ACTIVE" : ""),
+                 [this, r] { ShowObject(r.id, true, mode_); });
+      } else {
+        if (catalog.waypoints.empty())
+          Text("No waypoints saved.");
+        for (const auto &p : catalog.waypoints)
+          Action(Name(p.name, p.id) + (p.in_route ? " / in route" : " / mark"),
+                 [this, id = p.id] { ShowObject(id, false, mode_); });
+      }
+    }
+    Action("Advanced / Legacy route manager",
+           actions_.navigation.legacy_route_manager);
+  } else if (page_ == ProductPage::RouteDetail)
+    RouteActions();
+  else if (page_ == ProductPage::WaypointDetail)
+    PointActions();
+  else if (page_ == ProductPage::Instruments) {
+    Instruments();
+  } else if (page_ == ProductPage::Ais) {
+    wxString traffic_note = "Traffic, closest approach and vessel information";
+#if XNAV_ENABLE_TEST_FIXTURES
+    if (state_.ais.simulated) traffic_note = "DEMO targets / not chart traffic";
+#endif
+    Heading("AIS targets", traffic_note);
+    Action("Refresh target list", [this] { Build(); });
+    Action("Show / hide AIS on chart", actions_.navigation.toggle_ais);
+    if (state_.ais.targets.empty())
+      Text("No AIS targets received. Check the AIS connection in Sensors.");
+    for (const auto &t : state_.ais.targets)
+      Action(Name(t.name, std::to_string(t.mmsi)) + " / " + W(t.status) +
+                 (t.upstream_alarm ? " / ALARM" : ""),
+             [this, id = t.mmsi] { ShowAis(id, mode_); });
+  } else if (page_ == ProductPage::AisDetail) {
+    const auto *selected_target = Target(state_, mmsi_);
+    Heading(selected_target ? Name(selected_target->name, std::to_string(mmsi_)) : wxString("AIS target"),
+            wxString::Format("MMSI %d", mmsi_));
+    Visual("AIS encounter", 220, [this](XNavPainter &p, wxDC &, int width) {
+      const auto *target = Target(state_, mmsi_);
+      p.Card(0, 0, width, 216, target && target->upstream_alarm ? "AIS ALARM" : "VESSEL MOTION & APPROACH");
+      if (!target) { p.Text("Target no longer available", 24, 64, 23, p.c.attention); return; }
+      const int cell = (width - 48) / 4;
+      Metric(p, target->sog_kn, state_.now, 24, 58, cell - 16, "SPEED", "kn");
+      Metric(p, target->cog_deg, state_.now, 24 + cell, 58, cell - 16, "COURSE", W("° TRUE"), 0);
+      Metric(p, target->cpa_nm, state_.now, 24 + cell * 2, 58, cell - 16, "CPA", "NM", 2);
+      Metric(p, target->tcpa_minutes, state_.now, 24 + cell * 3, 58, cell - 16, "TCPA", "min", 0);
+      p.Text(W(target->status), 24, 184, 12, target->upstream_alarm ? p.c.attention : p.c.secondary, false, width - 48);
+    });
+    BeginActions(2);
+    Action("Select target on chart", [this] {
+      if (actions_.navigation.view_ais) {
+        const auto result = actions_.navigation.view_ais(mmsi_);
+        if (!result.ok) Result(result);
+        else if (actions_.chart) actions_.chart();
+      }
+    }, !state_.vessel.simulated && !state_.vessel.replayed)->SetRole(ButtonRole::Primary);
+    Action("Back to targets", [this] { ShowPage(ProductPage::Ais, mode_); });
+    EndActions();
+    Visual("AIS position", 180, [this](XNavPainter &p, wxDC &, int width) {
+      const auto *target = Target(state_, mmsi_);
+      p.Card(0, 0, width, 176, "POSITION RELATIVE TO VESSEL");
+      const int cell = (width - 48) / 3;
+      Metric(p, target ? target->range_nm : vessel::Sample{}, state_.now, 24, 48, cell - 16, "RANGE", "NM");
+      Metric(p, target ? target->bearing_true_deg : vessel::Sample{}, state_.now, 24 + cell, 48, cell - 16, "BEARING", W("° TRUE"), 0);
+      Metric(p, target ? target->heading_true_deg : vessel::Sample{}, state_.now, 24 + cell * 2, 48, cell - 16, "HEADING", W("° TRUE"), 0);
+    });
+  } else if (page_ == ProductPage::Advice) {
+    Heading("SmartNav", "Passage timeline / Advice only");
+    auto next = [](const ProductState &s, int field) {
+      vessel::Sample sample;
+      for (const auto &e : s.advice.events)
+        if (e.kind == smartnav::EventKind::Turn) {
+          sample.value = field == 0   ? e.course_true_deg
+                         : field == 1 ? e.course_change_deg
+                         : field == 2 ? e.distance_nm
+                                      : e.seconds_from_now;
+          if (field == 3 && sample.value)
+            *sample.value /= 60;
+          sample.source = e.source;
+          sample.observed_at = e.observed_at;
+          sample.validity = vessel::Validity::Estimated;
+          break;
+        }
+      return sample;
+    };
+    Value(
+        "NEXT COURSE", "deg true", [next](const auto &s) { return next(s, 0); },
+        0);
+    Value(
+        "COURSE CHANGE", "deg / advisory",
+        [next](const auto &s) { return next(s, 1); }, 0);
+    Value("DISTANCE TO TURN", "NM",
+          [next](const auto &s) { return next(s, 2); });
+    Value(
+        "TIME TO TURN", "minutes / estimated",
+        [next](const auto &s) { return next(s, 3); }, 0);
+
+    LiveText([](const auto &s) {
+      wxString text = W(s.advice.reason);
+      for (const auto &e : s.advice.events) {
+        text += "\n\n";
+        text += e.seconds_from_now ? wxString::Format("+ %.0f min   ",
+                                                      *e.seconds_from_now / 60)
+                                   : "Time unavailable   ";
+        text += W(e.title) + "\n" + W(e.detail);
+      }
+      return text;
+    });
+    Text("CHART LOOK-AHEAD / Unavailable", 18);
+    Text("Chart hazard look-ahead is unavailable. Depth is measured at the "
+         "boat, not ahead. Always inspect the chart and surroundings.");
+  } else if (page_ == ProductPage::PilotSettings)
+    PilotSettings();
+  else if (page_ == ProductPage::Pilot)
+    Text("Autopilot controls are unavailable in this view.");
+  else if (page_ == ProductPage::Anchor) {
+    Heading("Anchor watch", "Anchor watch is unavailable in this context");
+  } else if (page_ == ProductPage::Settings) {
+    Heading("Settings", "Your vessel, navigation and display");
+    BeginActions(2);
+    for (const auto &entry : std::vector<std::pair<wxString, ProductPage>>{
+        {"VESSEL", ProductPage::VesselSettings},
+        {"NAVIGATION", ProductPage::NavigationSettings},
+        {"SENSORS", ProductPage::Sources},
+        {"AUTOPILOT", ProductPage::PilotSettings},
+        {"RADAR", ProductPage::Radar},
+        {"DISPLAY", ProductPage::Display},
+        {"SYSTEM", ProductPage::System}})
+      Action(entry.first, [this, entry] { ShowPage(entry.second, mode_); });
+    EndActions();
+  } else if (page_ == ProductPage::NavigationSettings) {
+    Heading("Navigation", "Passages, chart presentation and alarms");
+    BeginActions(2);
+    Action("Routes", [this] { ShowPage(ProductPage::Routes, mode_); });
+    Action("Waypoints", [this] { ShowPage(ProductPage::Waypoints, mode_); });
+    Action("Chart orientation: North / Course up", [this] {
+      if (actions_.chart) actions_.chart();
+      if (actions_.navigation.orientation) actions_.navigation.orientation();
+    });
+    Action("Advanced / Legacy Settings", actions_.navigation.legacy_settings);
+    EndActions();
+    Text("Units, chart presentation and navigation alarm settings remain available in Advanced / Legacy Settings.");
+  } else if (page_ == ProductPage::Display) {
+    DisplaySettings();
+  } else if (page_ == ProductPage::RailLayout ||
+             page_ == ProductPage::InstrumentLayout) {
+    InstrumentSelection(page_ == ProductPage::RailLayout);
+  } else if (page_ == ProductPage::EnergySettings) {
+    EnergySettings();
+  } else if (page_ == ProductPage::Sources) {
+    Sources();
+  } else if (page_ == ProductPage::SourcesAdvanced) {
+    Heading("Advanced source details", "Values, source selection and freshness");
+    BeginActions(2);
+    for (const auto &q : vessel::Quantities())
+      Action(W(q.name), [this, q] { source_quantity_ = q.quantity; ShowPage(ProductPage::SourceDetail, mode_); });
+    EndActions();
+  } else if (page_ == ProductPage::BoatMapping) {
+    BoatMapping();
+  } else if (page_ == ProductPage::SourceDetail) {
+    SourceDetail();
+  } else if (page_ == ProductPage::Radar) {
+    radar_=new XNavRadarPanel(this);
+    radar_->on_close=actions_.chart;
+    radar_->on_plugins=actions_.navigation.plugin_settings;
+    radar_->Update(state_.radar,state_.now,state_.vessel.replayed,mode_);
+    body_->Add(radar_,0,wxEXPAND);
+  } else if (page_ == ProductPage::VesselSettings) {
+    Heading("Vessel safety settings",
+            "Dimensions and energy");
+    Action("Back to Settings",
+           [this] { ShowPage(ProductPage::Settings, mode_); });
+    Text("Draft and margin describe your vessel for future hazard advice. "
+         "They do not change chart safety contours or depth alarms. "
+         "Live chart hazard look-ahead is unavailable.");
+    LiveText([](const auto &s) {
+      auto value = [](double n) {
+        return std::isfinite(n) ? wxString::Format("%.2f m", n)
+                               : wxString("Unconfigured");
+      };
+      return "Draft: " + value(s.settings.hazard.draft_m) +
+             " / Margin: " + value(s.settings.hazard.safety_margin_m) +
+             " / Corridor half width: " + value(s.settings.hazard.corridor_half_width_m);
+    });
+    Action("Energy configuration", [this] { ShowPage(ProductPage::EnergySettings, mode_); });
+    Action("Configure draft & margin", [this] {
+      auto s = actions_.settings();
+      auto n = [](double v) {
+        return std::isfinite(v) ? wxString::Format("%.6g", v) : wxString{};
+      };
+      auto f = EditSheet(
+          *this, mode_, "Vessel corridor assumptions",
+          "Metres. Blank leaves a field unconfigured. This does not enable a "
+          "live ENC hazard service.",
+          {{"Vessel draft / m", n(s.hazard.draft_m), 64},
+           {"Safety margin / m", n(s.hazard.safety_margin_m), 64},
+           {"Corridor half width / m", n(s.hazard.corridor_half_width_m), 64}});
+      if (!f)
+        return;
+      try {
+        s.hazard.draft_m = application::ParseSettingNumber((*f)[0]);
+        s.hazard.safety_margin_m = application::ParseSettingNumber((*f)[1]);
+        s.hazard.corridor_half_width_m =
+            application::ParseSettingNumber((*f)[2]);
+        SaveSettings(std::move(s));
+      } catch (const std::exception &e) {
+        Result({false, e.what()});
+      }
+    });
+    Action("Chart / alarm settings", actions_.navigation.legacy_settings);
+  }
+  if (page_ != ProductPage::Instruments && page_ != ProductPage::Radar) body_->AddSpacer(FromDIP(24));
+  Layout();
+  FitInside();
+  Thaw();
+}
+} // namespace opennav::ui

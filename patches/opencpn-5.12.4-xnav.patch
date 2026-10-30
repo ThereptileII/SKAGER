@@ -1,0 +1,1138 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 11e429677..2d54c45b3 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -2771,6 +2771,11 @@ endif ()
+ add_subdirectory(model)
+ target_link_libraries(${PACKAGE_NAME} PUBLIC ocpn::model-src ocpn::model)
+ 
++set(OPENNAV_ROOT "" CACHE PATH "Optional OpenNav X integration source root")
++if(OPENNAV_ROOT)
++  include("${OPENNAV_ROOT}/src/integration/OpenCPN.cmake")
++endif()
++
+ if (OCPN_BUILD_TEST)
+ 
+   add_subdirectory(libs/gtest)
+diff --git a/gui/src/canvasMenu.cpp b/gui/src/canvasMenu.cpp
+index b65126b6c..0cceb4c8d 100644
+--- a/gui/src/canvasMenu.cpp
++++ b/gui/src/canvasMenu.cpp
+@@ -24,6 +24,9 @@
+  **************************************************************************/
+ 
+ // For compilers that support precompilation, includes "wx.h".
++#ifdef OPENNAV_X
++#include "integration/OpenCPNIntegration.h"
++#endif
+ #include <wx/wxprec.h>
+ 
+ #include <wx/aui/aui.h>
+@@ -1060,6 +1063,9 @@ void CanvasMenuHandler::CanvasPopupMenu(int x, int y, int seltype) {
+   setMenuStyleSheet(menuAIS, GetOCPNGUIScaledFont(_("Menu")));
+ #endif
+ 
++#ifdef OPENNAV_X
++  opennav::AppendModeMenu(*menuFocus);
++#endif
+   parent->PopupMenu(menuFocus, x, y);
+ 
+ #ifdef __ANDROID__
+diff --git i/gui/src/chcanv.cpp w/gui/src/chcanv.cpp
+index 258ae04bc..98938dfee 100644
+--- i/gui/src/chcanv.cpp
++++ w/gui/src/chcanv.cpp
+@@ -24,6 +24,9 @@
+  **************************************************************************/
+ 
+ // For compilers that support precompilation, includes "wx.h".
++#ifdef OPENNAV_X
++#include "integration/OpenCPNIntegration.h"
++#endif
+ #include <wx/wxprec.h>
+ 
+ #ifndef WX_PRECOMP
+@@ -1094,6 +1097,12 @@ void ChartCanvas::SetupGlCanvas() {
+ void ChartCanvas::OnKillFocus(wxFocusEvent &WXUNUSED(event)) {
+   RefreshRect(wxRect(0, 0, GetClientSize().x, m_focus_indicator_pix), false);
+ 
++#ifdef OPENNAV_X
++  // XNav has explicit route Finish/Cancel/Undo touch actions outside the
++  // canvas. Focus moving to one of them must not commit the draft first.
++  if (opennav::IsXNav()) return;
++#endif
++
+   // On Android, we get a KillFocus on just about every keystroke.
+   //  Why?
+ #ifdef __ANDROID__
+@@ -7122,6 +7131,9 @@ void ChartCanvas::ProcessNewGUIScale() {
+ }
+ 
+ void ChartCanvas::CreateMUIBar() {
++#ifdef OPENNAV_X
++  if (opennav::IsXNav()) return;
++#endif
+   if (g_useMUI && !m_muiBar) {  // rebuild if necessary
+ 
+     // We need to update the m_bENCGroup flag, at least for the initial creation
+@@ -10434,6 +10446,9 @@ void ChartCanvas::ShowObjectQueryWindow(int x, int y, float zlat, float zlon) {
+ }
+ 
+ void ChartCanvas::ShowMarkPropertiesDialog(RoutePoint *markPoint) {
++#ifdef OPENNAV_X
++  if (markPoint && opennav::ShowNavigationObjectCard(markPoint->m_GUID.ToStdString(wxConvUTF8), false)) return;
++#endif
+   bool bNew = false;
+   if (!g_pMarkInfoDialog) {  // There is one global instance of the MarkProp
+                              // Dialog
+@@ -10492,6 +10507,9 @@ void ChartCanvas::ShowMarkPropertiesDialog(RoutePoint *markPoint) {
+ }
+ 
+ void ChartCanvas::ShowRoutePropertiesDialog(wxString title, Route *selected) {
++#ifdef OPENNAV_X
++  if (selected && opennav::ShowNavigationObjectCard(selected->GetGUID().ToStdString(wxConvUTF8), true)) return;
++#endif
+   pRoutePropDialog = RoutePropDlgImpl::getInstance(this);
+   pRoutePropDialog->SetRouteAndUpdate(selected);
+   // pNew->UpdateProperties();
+@@ -10767,6 +10785,26 @@ void pupHandler_PasteTrack() {
+ }
+ 
+ bool ChartCanvas::InvokeCanvasMenu(int x, int y, int seltype) {
++#ifdef OPENNAV_X
++  // Use upstream hit-testing and geographic conversion. OpenNav receives only
++  // copied identities/coordinates, after the canvas event stack unwinds.
++  if (opennav::IsXNav() && !m_routeState && !m_bMeasure_Active) {
++    if ((seltype & SELTYPE_AISTARGET) && m_FoundAIS_MMSI > 0 &&
++        opennav::ShowAisCard(m_FoundAIS_MMSI)) return true;
++    if ((seltype & SELTYPE_ROUTEPOINT) && m_pFoundRoutePoint &&
++        opennav::ShowNavigationObjectCard(
++            m_pFoundRoutePoint->m_GUID.ToStdString(wxConvUTF8), false)) return true;
++    if ((seltype & SELTYPE_ROUTESEGMENT) && m_pSelectedRoute &&
++        opennav::ShowNavigationObjectCard(
++            m_pSelectedRoute->GetGUID().ToStdString(wxConvUTF8), true)) return true;
++    if (seltype == SELTYPE_UNKNOWN) {
++      if (opennav::ShowOnlineAisAt(*this, x, y)) return true;
++      double latitude, longitude;
++      GetCanvasPixPoint(x, y, latitude, longitude);
++      if (opennav::ShowChartContext(latitude, longitude)) return true;
++    }
++  }
++#endif
+   m_canvasMenu = new CanvasMenuHandler(this, m_pSelectedRoute, m_pSelectedTrack,
+                                        m_pFoundRoutePoint, m_FoundAIS_MMSI,
+                                        m_pIDXCandidate, m_nmea_log);
+@@ -11813,13 +11851,14 @@ void ChartCanvas::OnPaint(wxPaintEvent &event) {
+       delete clip_region;
+ 
+       ocpnDC bgdc(temp_dc);
+-      double r = VPoint.rotation;
+-      SetVPRotation(VPoint.skew);
+-
+-      // pWorldBackgroundChart->RenderViewOnDC(bgdc, VPoint);
+-      gShapeBasemap.RenderViewOnDC(bgdc, VPoint);
+-
+-      SetVPRotation(r);
++      // Rendering must not change the canvas viewport. SetVPRotation() here
++      // recomposes a rotated quilt and invalidates the window on every paint,
++      // starving Windows timer messages. Keep the same background geometry
++      // (physical size, projection and skew) on a private viewport instead.
++      ViewPort background_vp = VPoint;
++      background_vp.SetRotationAngle(VPoint.skew);
++      background_vp.SetBoxes();
++      gShapeBasemap.RenderViewOnDC(bgdc, background_vp);
+     }
+   }  // temp_dc.IsOk();
+ 
+@@ -13448,6 +13487,9 @@ wxString ChartCanvas::FindValidUploadPort() {
+ 
+ void ShowAISTargetQueryDialog(wxWindow *win, int mmsi) {
+   if (!win) return;
++#ifdef OPENNAV_X
++  if (opennav::ShowAisCard(mmsi)) return;
++#endif
+ 
+   if (NULL == g_pais_query_dialog_active) {
+     int pos_x = g_ais_query_dialog_x;
+diff --git a/gui/include/gui/ocpn_app.h b/gui/include/gui/ocpn_app.h
+index 798a735d0..dfcd2809c 100644
+--- a/gui/include/gui/ocpn_app.h
++++ b/gui/include/gui/ocpn_app.h
+@@ -34,6 +34,10 @@
+ #include <wx/event.h>
+ #endif  // precompiled headers
+ 
++#ifdef OPENNAV_X
++#include "diagnostics/TestEarlyStartupTrace.h"
++#endif
++
+ #include "model/instance_check.h"
+ 
+ #include "model/comm_bridge.h"
+@@ -49,6 +53,10 @@ public:
+   MyApp();
+   ~MyApp() {};
+ 
++#if XNAV_TEST_EARLY_STARTUP
++  bool Initialize(int& argc, wxChar** argv) override;
++  bool OnCmdLineError(wxCmdLineParser& parser) override;
++#endif
+   bool OnInit() override;
+   int OnExit() override;
+ #ifndef __ANDROID__
+diff --git a/gui/src/ocpn_app.cpp b/gui/src/ocpn_app.cpp
+index a7670a674..1542f919c 100644
+--- a/gui/src/ocpn_app.cpp
++++ b/gui/src/ocpn_app.cpp
+@@ -22,6 +22,10 @@
+  *   Free Software Foundation, Inc.,                                       *
+  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301,  USA.         *
+  **************************************************************************/
++#ifdef OPENNAV_X
++#include "integration/OpenCPNIntegration.h"
++#include "integration/InstallerSelfTest.h"
++#endif
+ #include "config.h"
+ 
+ #ifdef __MINGW32__
+@@ -768,7 +772,18 @@ wxString newPrivateFileName(wxString, const char *name,
+ //------------------------------------------------------------------------------
+ // MyApp
+ //------------------------------------------------------------------------------
++#if XNAV_TEST_EARLY_STARTUP
++wxIMPLEMENT_APP_NO_MAIN(MyApp);
++int main(int argc, char** argv) {
++  wxDISABLE_DEBUG_SUPPORT();
++  using opennav::diagnostics::StartupStage;
++  return opennav::diagnostics::ObserveStartupCall(
++      StartupStage::Entry, StartupStage::EntryReturn,
++      [&] { return wxEntry(argc, argv); });
++}
++#else
+ IMPLEMENT_APP(MyApp)
++#endif
+ 
+ BEGIN_EVENT_TABLE(MyApp, wxApp)
+ EVT_ACTIVATE_APP(MyApp::OnActivateApp)
+@@ -843,6 +858,12 @@ bool MyApp::OpenFile(const std::string &path) {
+ 
+ #ifndef __ANDROID__
+ void MyApp::OnInitCmdLine(wxCmdLineParser &parser) {
++#if XNAV_TEST_EARLY_STARTUP
++  XNAV_EARLY_STARTUP_TRACE(ParserDefinition, 0);
++#endif
++#ifdef OPENNAV_X
++  opennav::AddCommandLine(parser);
++#endif
+   // Add OpenCPN specific command line options. Help message
+   // is hardcoded in kUsage;
+   parser.AddSwitch("h", "help", "", wxCMD_LINE_OPTION_HELP);
+@@ -894,19 +915,45 @@ static void ParseLoglevel(wxCmdLineParser &parser) {
+ 
+ #ifndef __ANDROID__
+ bool MyApp::OnCmdLineHelp(wxCmdLineParser &parser) {
++#if XNAV_TEST_EARLY_STARTUP
++  XNAV_EARLY_STARTUP_TRACE(ParserHelp, 0);
++#endif
+   std::cout << kUsage;
++#ifdef OPENNAV_X
++  std::cout << "  --xnav | --legacy | --safe-mode  OpenNav interface/recovery mode\n";
++#if XNAV_ENABLE_TEST_FIXTURES
++  std::cout << "  --xnav-demo                     Explicit simulated telemetry\n";
++#endif
++#endif
+   return false;
+ }
+ #endif
+ 
+ #ifndef __ANDROID__
+ bool MyApp::OnCmdLineParsed(wxCmdLineParser &parser) {
++#if XNAV_TEST_EARLY_STARTUP
++  XNAV_EARLY_STARTUP_TRACE(ParserParsed, 0);
++#endif
++#ifdef OPENNAV_X
++#if XNAV_TEST_EARLY_STARTUP
++  const bool parsed = opennav::ParseCommandLine(parser);
++  XNAV_EARLY_STARTUP_TRACE(OpenNavParserReturn, parsed);
++  if (!parsed) return false;
++#else
++  if (!opennav::ParseCommandLine(parser)) return false;
++#endif
++  if (opennav::integration::InstallerSelfTestRequested()) return true;
++#endif
+   long number;
+   wxString repo;
+   wxString plugin;
+ 
+   g_unit_test_2 = parser.Found("unit_test_2");
++#ifdef OPENNAV_X
++  g_bportable = parser.Found("p") || opennav::IsPortablePreview();
++#else
+   g_bportable = parser.Found("p");
++#endif
+   g_start_fullscreen = parser.Found("fullscreen");
+   g_bdisable_opengl = parser.Found("no_opengl");
+   g_rebuild_gl_cache = parser.Found("rebuild_gl_raster_cache");
+@@ -917,20 +964,43 @@ bool MyApp::OnCmdLineParsed(wxCmdLineParser &parser) {
+     g_unit_test_1 = static_cast<int>(number);
+     if (g_unit_test_1 == 0) g_unit_test_1 = -1;
+   }
++#ifdef OPENNAV_X
++  safe_mode::set_mode(parser.Found("safe_mode") || opennav::SafeRequested());
++#else
+   safe_mode::set_mode(parser.Found("safe_mode"));
++#endif
+   ParseLoglevel(parser);
+   wxString wxstr;
+   if (parser.Found("configdir", &wxstr)) {
++#if XNAV_TEST_EARLY_STARTUP
++    XNAV_EARLY_STARTUP_TRACE(ConfigDirectory, 0);
++#endif
+     g_configdir = wxstr.ToStdString();
+     fs::path path(g_configdir);
+     if (!fs::exists(path) || !fs::is_directory(path)) {
++#if XNAV_TEST_EARLY_STARTUP
++      XNAV_EARLY_STARTUP_TRACE(ConfigDirectoryReturn, false);
++#endif
+       std::cerr << g_configdir << " is not an existing directory.\n";
+       return false;
+     }
++#if XNAV_TEST_EARLY_STARTUP
++    XNAV_EARLY_STARTUP_TRACE(ConfigDirectoryReturn, true);
++#endif
+   }
+ 
++#ifdef OPENNAV_X
++  bool has_start_options = opennav::IsPortablePreview();
++#else
+   bool has_start_options = false;
++#endif
+   static const std::vector<std::string> kStartOptions = {
++#ifdef OPENNAV_X
++      "xnav", "legacy", "safe-mode",
++#if XNAV_ENABLE_TEST_FIXTURES
++      "xnav-demo",
++#endif
++#endif
+       "unit_test_2",
+       "p",
+       "fullscreen",
+@@ -1024,8 +1094,34 @@ MyApp::MyApp()
+ #endif     // __linux__
+ }
+ 
++#if XNAV_TEST_EARLY_STARTUP
++bool MyApp::Initialize(int& argc, wxChar** argv) {
++  using opennav::diagnostics::StartupStage;
++  return opennav::diagnostics::ObserveStartupCall(
++      StartupStage::Initialize, StartupStage::InitializeReturn,
++      [&] { return wxApp::Initialize(argc, argv); });
++}
++bool MyApp::OnCmdLineError(wxCmdLineParser& parser) {
++  XNAV_EARLY_STARTUP_TRACE(ParserError, 0);
++  return wxApp::OnCmdLineError(parser);
++}
++#endif
++
+ bool MyApp::OnInit() {
++#if XNAV_TEST_EARLY_STARTUP
++  using opennav::diagnostics::StartupStage;
++  if (!opennav::diagnostics::ObserveStartupCall(
++          StartupStage::OnInit, StartupStage::ParserReturn,
++          [&] { return wxApp::OnInit(); })) return false;
++#else
+   if (!wxApp::OnInit()) return false;
++#endif
++#ifdef OPENNAV_X
++  if (opennav::integration::InstallerSelfTestRequested()) {
++    m_exitcode = opennav::integration::RunInstallerSelfTest();
++    return true;
++  }
++#endif
+ #ifdef __ANDROID__
+   androidEnableBackButton(false);
+   androidEnableOptionItems(false);
+@@ -1100,6 +1196,10 @@ bool MyApp::OnInit() {
+   }
+ 
+ #ifndef __ANDROID__
++#ifdef OPENNAV_X
++  // XNav's bounded startup guard runs before upstream recovery/plugin/GL setup.
++  if (opennav::CheckStartupRecovery()) safe_mode::set_mode(true);
++#endif
+   // Check if last run failed, set up safe_mode.
+   if (!safe_mode::get_mode()) {
+     safe_mode::check_last_start();
+@@ -1151,9 +1251,15 @@ bool MyApp::OnInit() {
+   noteman.ScrubNotificationDirectory(30);
+ 
+   //      Establish Log File location
++#if XNAV_TEST_EARLY_STARTUP
++  if (!opennav::diagnostics::ObserveStartupCall(
++          StartupStage::LogInitialize, StartupStage::LogInitializeReturn,
++          [&] { return g_Platform->InitializeLogFile(); })) return false;
++#else
+   if (!g_Platform->InitializeLogFile()) {
+     return false;
+   };
++#endif
+ 
+ #ifdef __WXMSW__
+ 
+@@ -1314,6 +1420,9 @@ bool MyApp::OnInit() {
+   pConfig = g_Platform->GetConfigObject();
+   InitBaseConfig(pConfig);
+   pConfig->LoadMyConfig();
++#ifdef OPENNAV_X
++  opennav::SelectMode(*pConfig, safe_mode::get_mode());
++#endif
+ 
+   //  Override for some safe and nice default values if the config file was
+   //  created from scratch
+@@ -1509,6 +1618,10 @@ bool MyApp::OnInit() {
+ 
+   InitRestListeners();
+ 
++#ifdef OPENNAV_X
++  opennav::InitializeResourceDefaults(*pConfig);
++#endif
++
+   //      Establish the GSHHS Dataset location
+   gDefaultWorldMapLocation = "gshhs";
+   gDefaultWorldMapLocation.Prepend(g_Platform->GetSharedDataDir());
+@@ -1977,7 +2090,11 @@ bool MyApp::OnInit() {
+   std::vector<std::string> ipv4_addrs = get_local_ipv4_addresses();
+ 
+   // If network connection is available, start the server and mDNS client
+-  if (ipv4_addrs.size()) {
++  if (ipv4_addrs.size()
++#ifdef OPENNAV_X
++      && !opennav::IsPortablePreview()
++#endif
++  ) {
+     std::string ipAddr = ipv4_addrs[0];
+ 
+     wxString data_dir = g_Platform->GetPrivateDataDir();
+@@ -1990,10 +2107,16 @@ bool MyApp::OnInit() {
+     StartMDNSService(g_hostname.ToStdString(), "opencpn-object-control-service",
+                      8000);
+   }
++#ifdef OPENNAV_X
++  opennav::Attach(*gFrame, *g_pauimgr, *pConfig);
++#endif
+   return TRUE;
+ }
+ 
+ int MyApp::OnExit() {
++#ifdef OPENNAV_X
++  if (opennav::integration::InstallerSelfTestRequested()) return 0;
++#endif
+   wxLogMessage(_T("opencpn::MyApp starting exit."));
+   m_checker.OnExit();
+   m_usb_watcher.Stop();
+@@ -2118,6 +2241,9 @@ int MyApp::OnExit() {
+   g_Platform->OnExit_2();
+   safe_mode::clear_check();
+   delete g_Platform;
++#ifdef OPENNAV_X
++  opennav::CompleteRestart();
++#endif
+ 
+   return TRUE;
+ }
+diff --git a/gui/src/ocpn_frame.cpp b/gui/src/ocpn_frame.cpp
+index 8b7a14403..74b928d44 100644
+--- a/gui/src/ocpn_frame.cpp
++++ b/gui/src/ocpn_frame.cpp
+@@ -22,6 +22,9 @@
+  *   Free Software Foundation, Inc.,                                       *
+  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301,  USA.         *
+  **************************************************************************/
++#ifdef OPENNAV_X
++#include "integration/OpenCPNIntegration.h"
++#endif
+ #include "config.h"
+ 
+ #ifdef __MINGW32__
+@@ -1669,6 +1672,9 @@ void MyFrame::OnCloseWindow(wxCloseEvent &event) {
+ 
+   if (bDBUpdateInProgress) return;
+ 
++#ifdef OPENNAV_X
++  if (!opennav::PrepareClose(*pConfig)) return;
++#endif
+   b_inCloseWindow = true;
+ 
+   ::wxSetCursor(wxCURSOR_WAIT);
+@@ -2090,7 +2096,13 @@
+       1000, wxTIMER_ONE_SHOT);  // One second seems enough, on average
+ }
+ 
+-void MyFrame::OnRecaptureTimer(wxTimerEvent &event) { Raise(); }
++void MyFrame::OnRecaptureTimer(wxTimerEvent &event) {
++#ifdef OPENNAV_X
++  // A late resize recapture must not cover an active owned sheet or card.
++  if (opennav::HasXNavTransientSurface()) return;
++#endif
++  Raise();
++}
+ 
+ void MyFrame::SetCanvasSizes(wxSize frameSize) {
+   if (!g_canvasArray.GetCount()) return;
+@@ -3017,6 +3029,9 @@ void MyFrame::ScheduleReconfigAndSettingsReload(bool reload, bool new_dialog) {
+       if (index_hint != -1) cc->SetVPScale(restoreScale[i]);
+     }
+   }
++#ifdef OPENNAV_X
++  opennav::AfterSettingsReconfigured();
++#endif
+ }
+ 
+ ChartCanvas *MyFrame::GetFocusCanvas() {
+@@ -3636,7 +3651,11 @@ void MyFrame::ConfigureStatusBar() {
+   UseNativeStatusBar(false);  // better for MSW, undocumented in frame.cpp
+ #endif
+ 
+-  if (g_bShowStatusBar) {
++  if (g_bShowStatusBar
++#ifdef OPENNAV_X
++      && !opennav::IsXNav()
++#endif
++  ) {
+     if (!m_pStatusBar) {
+       m_pStatusBar =
+           CreateStatusBar(m_StatusBarFieldCount, 0);  // No wxST_SIZEGRIP needed
+@@ -3690,6 +3709,9 @@ void MyFrame::BuildMenuBar(void) {
+     showMenuBar = true;
+ #endif
+ 
++#ifdef OPENNAV_X
++  if (opennav::IsXNav()) showMenuBar = false;
++#endif
+   if (showMenuBar) {
+     //  Menu bar has some dependencies on S52 PLIB, so be sure it is loaded.
+     LoadS57();
+@@ -3701,6 +3723,13 @@ void MyFrame::BuildMenuBar(void) {
+                                // to populate the OS X App Menu correctly
+     }
+ 
++#ifdef OPENNAV_X
++    if (m_pMenuBar->FindMenu("OpenNav") == wxNOT_FOUND) {
++      auto *mode_menu = new wxMenu();
++      opennav::AppendModeMenu(*mode_menu);
++      m_pMenuBar->Append(mode_menu, "OpenNav");
++    }
++#endif
+     UpdateGlobalMenuItems();  // update the state of the menu items (checkmarks
+                               // etc.)
+   } else {
+@@ -4868,6 +4897,9 @@ void MyFrame::OnInitTimer(wxTimerEvent &event) {
+       wxAuiPaneInfoArray pane_array_val = g_pauimgr->GetAllPanes();
+       for (unsigned int i = 0; i < pane_array_val.GetCount(); i++) {
+         wxAuiPaneInfo pane = pane_array_val.Item(i);
++#ifdef OPENNAV_X
++        if (opennav::IsTransientXNavPane(pane.window)) continue;
++#endif
+ 
+         // If we find a pane that is not in the perspective,
+         //  then we should not load the perspective at all
+@@ -4877,7 +4909,13 @@ void MyFrame::OnInitTimer(wxTimerEvent &event) {
+         }
+       }
+ 
+-      if (!bno_load) g_pauimgr->LoadPerspective(perspective, false);
++      if (!bno_load) {
++#ifdef OPENNAV_X
++        opennav::LoadPersistentPerspective(*g_pauimgr, perspective);
++#else
++        g_pauimgr->LoadPerspective(perspective, false);
++#endif
++      }
+ 
+ #if 0
+             // Undefine the canvas sizes as expressed by the loaded perspective
+@@ -5051,6 +5089,9 @@ void MyFrame::OnInitTimer(wxTimerEvent &event) {
+ 
+   RefreshAllCanvas(true);
+   wxGetApp().m_usb_watcher.Start();
++#ifdef OPENNAV_X
++  if (g_bDeferredInitDone) opennav::AfterDeferredInitialization();
++#endif
+ }
+ 
+ wxDEFINE_EVENT(EVT_BASIC_NAV_DATA, ObservedEvt);
+@@ -5808,6 +5849,10 @@ void MyFrame::OnFrameTimer1(wxTimerEvent &event) {
+   ProcessUnitTest();
+   g_tick++;
+   ProcessQuitFlag();
++#ifdef OPENNAV_X
++  // ProcessQuitFlag may destroy the frame/console during this timer callback.
++  if (b_inCloseWindow) return;
++#endif
+ 
+   if (bDBUpdateInProgress) return;
+ 
+@@ -5817,6 +5862,9 @@ void MyFrame::OnFrameTimer1(wxTimerEvent &event) {
+   ProcessDeferredTrackOn();
+   SendFixToPlugins();
+   ProcessAnchorWatch();
++#ifdef OPENNAV_X
++  opennav::AfterAnchorWatch();
++#endif
+   ProcessLogAndBells();
+ 
+   if (ShouldRestartTrack()) TrackDailyRestart();
+@@ -5850,7 +5898,13 @@ void MyFrame::OnFrameTimer1(wxTimerEvent &event) {
+   nBlinkerTick++;
+ 
+   // This call sends autopilot output strings to output ports.
++#ifdef OPENNAV_X
++  const auto route_observation = opennav::BeforeRouteProgress();
++#endif
+   bool bactiveRouteUpdate = RoutemanGui(*g_pRouteMan).UpdateProgress();
++#ifdef OPENNAV_X
++  opennav::AfterRouteProgress(route_observation);
++#endif
+ 
+   // For each canvas....
+   for (unsigned int i = 0; i < g_canvasArray.GetCount(); i++) {
+@@ -7961,13 +8015,22 @@ void ApplyLocale() {
+ 
+   for (unsigned int i = 0; i < pane_array_val.GetCount(); i++) {
+     wxAuiPaneInfo pane = pane_array_val[i];
++#ifdef OPENNAV_X
++    if (opennav::IsTransientXNavPane(pane.window)) continue;
++#endif
+     if (perspective.Find(pane.name) == wxNOT_FOUND) {
+       bno_load = true;
+       break;
+     }
+   }
+ 
+-  if (!bno_load) g_pauimgr->LoadPerspective(perspective, false);
++  if (!bno_load) {
++#ifdef OPENNAV_X
++    opennav::LoadPersistentPerspective(*g_pauimgr, perspective);
++#else
++    g_pauimgr->LoadPerspective(perspective, false);
++#endif
++  }
+ 
+   g_pauimgr->Update();
+ 
+diff --git a/gui/src/pluginmanager.cpp b/gui/src/pluginmanager.cpp
+index ef2314764..7475af772 100644
+--- a/gui/src/pluginmanager.cpp
++++ b/gui/src/pluginmanager.cpp
+@@ -1280,6 +1280,10 @@ wxString PlugInManager::GetPluginOrder() {
+ }
+ 
+ bool PlugInManager::UpdateConfig() {
++#ifdef OPENNAV_X
++  // Safe Mode disables plugins for this session, not the next normal startup.
++  if (safe_mode::get_mode()) return true;
++#endif
+   //    pConfig->SetPath( _T("/PlugIns/") );
+   //    pConfig->Write( _T("PluginOrder"), GetPluginOrder() );
+ 
+diff --git a/gui/src/routeman_gui.cpp b/gui/src/routeman_gui.cpp
+index 557627227..8a7a170e8 100644
+--- a/gui/src/routeman_gui.cpp
++++ b/gui/src/routeman_gui.cpp
+@@ -50,6 +50,9 @@
+ #include "ocpn_frame.h"
+ #include "routemanagerdialog.h"
+ #include "routeman_gui.h"
++#ifdef OPENNAV_X
++#include "integration/OpenCPNIntegration.h"
++#endif
+ #include "TrackPropDlg.h"
+ #include "vector2D.h"
+ #include "model/navobj_db.h"
+@@ -81,6 +84,11 @@ RoutemanDlgCtx RoutemanGui::GetDlgCtx() {
+   ctx.confirm_delete_ais_mob = []() { return ConfirmDeleteAisMob(); };
+   ctx.get_global_colour = [](wxString c) { return GetGlobalColor(c); };
+   ctx.show_with_fresh_fonts = [] {
++#ifdef OPENNAV_X
++    // XNav renders its own validity-aware route panel and vessel-data rail.
++    // Preserve this native console for Legacy and Safe modes only.
++    if (opennav::IsXNav()) return;
++#endif
+     if (console) console->ShowWithFreshFonts();
+   };
+   ctx.clear_console_background = []() {
+diff --git a/gui/src/toolbar.cpp b/gui/src/toolbar.cpp
+index e71022302..0cdc305e1 100644
+--- a/gui/src/toolbar.cpp
++++ b/gui/src/toolbar.cpp
+@@ -23,6 +23,9 @@
+  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301,  USA.         *
+  **************************************************************************/
+ 
++#ifdef OPENNAV_X
++#include "integration/OpenCPNIntegration.h"
++#endif
+ #include <wx/wxprec.h>
+ 
+ #ifndef WX_PRECOMP
+@@ -509,6 +512,9 @@ wxPoint ocpnFloatingToolbarDialog::GetToolbarPosition() {
+ }
+ 
+ bool ocpnFloatingToolbarDialog::MouseEvent(wxMouseEvent &event) {
++#ifdef OPENNAV_X
++  if (opennav::HideLegacyToolbar(this)) return false;
++#endif
+   if (g_disable_main_toolbar) return false;
+   if (m_ptoolbar) {
+     bool bproc = m_ptoolbar->OnMouseEvent(event, m_position);
+@@ -554,6 +560,9 @@ void ocpnFloatingToolbarDialog::Realize() {
+ }
+ 
+ void ocpnFloatingToolbarDialog::DrawDC(ocpnDC &dc, double displayScale) {
++#ifdef OPENNAV_X
++  if (opennav::HideLegacyToolbar(this)) return;
++#endif
+   if (m_ptoolbar) {
+     m_ptoolbar->CreateBitmap();
+     if (m_ptoolbar->GetBitmap().IsOk()) {
+@@ -564,6 +573,9 @@ void ocpnFloatingToolbarDialog::DrawDC(ocpnDC &dc, double displayScale) {
+ }
+ 
+ void ocpnFloatingToolbarDialog::DrawGL(ocpnDC &gldc, double displayScale) {
++#ifdef OPENNAV_X
++  if (opennav::HideLegacyToolbar(this)) return;
++#endif
+   if (g_disable_main_toolbar) return;
+ 
+ #ifdef ocpnUSE_GL
+diff --git a/model/src/plugin_loader.cpp b/model/src/plugin_loader.cpp
+index dd8543de5..cd4b3b797 100644
+--- a/model/src/plugin_loader.cpp
++++ b/model/src/plugin_loader.cpp
+@@ -625,7 +625,9 @@ bool PluginLoader::LoadPluginCandidate(const wxString& file_name,
+ 
+       if (safe_mode::get_mode()) {
+         pic->m_enabled = false;
++#ifndef OPENNAV_X
+         enabled.Set(false);
++#endif
+       }
+       if (dynamic_cast<wxApp*>(wxAppConsole::GetInstance())) {
+         // The CLI has no graphics context, but plugins assumes there is.
+diff --git i/model/include/model/comm_drv_n2k_net.h w/model/include/model/comm_drv_n2k_net.h
+index c3532ab6e..38f2a4133 100644
+--- i/model/include/model/comm_drv_n2k_net.h
++++ w/model/include/model/comm_drv_n2k_net.h
+@@ -38,6 +38,8 @@
+ #include "model/conn_params.h"
+ 
+ #include <wx/datetime.h>
++#include <chrono>
++#include <cstdint>
+ 
+ #ifdef __WXGTK__
+ // newer versions of glib define its own GSocket but we unfortunately use this
+@@ -135,7 +137,23 @@ public:
+                    std::shared_ptr<const NavAddr> addr) override;
+   wxSocketBase* GetSock() const { return m_sock; }
+ 
++  // Read-only transport provenance for integrations. Querying these values
++  // does not discover a gateway, register PGNs or transmit a message.
++  N2K_Format GetN2kFormat() const { return m_n2k_format; }
++  std::uint64_t GetConnectionGeneration() const { return m_connection_generation; }
++  std::chrono::steady_clock::time_point GetConnectionChangedAt() const {
++    return m_connection_changed_at;
++  }
++
+ private:
++  void ConnectionChanged() {
++    ++m_connection_generation;
++    m_connection_changed_at = std::chrono::steady_clock::now();
++  }
++  std::uint64_t m_connection_generation = 1;
++  std::chrono::steady_clock::time_point m_connection_changed_at =
++      std::chrono::steady_clock::now();
++
+   ConnectionParams m_params;
+   DriverListener& m_listener;
+ 
+@@ -146,7 +164,7 @@ private:
+     return &m_socketread_watchdog_timer;
+   }
+   wxTimer* GetSocketTimer() { return &m_socket_timer; }
+-  void SetSock(wxSocketBase* sock) { m_sock = sock; }
++  void SetSock(wxSocketBase* sock) { ConnectionChanged(); m_sock = sock; }
+   void SetTSock(wxSocketBase* sock) { m_tsock = sock; }
+   wxSocketBase* GetTSock() const { return m_tsock; }
+   void SetSockServer(wxSocketServer* sock) { m_socket_server = sock; }
+diff --git i/model/src/comm_drv_n2k_net.cpp w/model/src/comm_drv_n2k_net.cpp
+index 74e79f678..262dc46dd 100644
+--- i/model/src/comm_drv_n2k_net.cpp
++++ w/model/src/comm_drv_n2k_net.cpp
+@@ -453,7 +453,7 @@ void CommDriverN2KNet::OnSocketReadWatchdogTimer(wxTimerEvent& event) {
+       // Reconnect on NO DATA is true, so try to reconnect now.
+       if (GetProtocol() == TCP) {
+         wxSocketClient* tcp_socket = dynamic_cast<wxSocketClient*>(GetSock());
+-        if (tcp_socket) tcp_socket->Close();
++        if (tcp_socket) { ConnectionChanged(); tcp_socket->Close(); }
+ 
+         int n_reconnect_delay = wxMax(N_DOG_TIMEOUT - 2, 2);
+         wxLogMessage(wxString::Format(" Reconnection scheduled in %d seconds.",
+@@ -1348,6 +1348,7 @@ void CommDriverN2KNet::OnSocketEvent(wxSocketEvent& event) {
+ #if 1
+ 
+     case wxSOCKET_LOST: {
++      ConnectionChanged();
+       m_driver_stats.available = false;
+       if (GetProtocol() == TCP || GetProtocol() == GPSD) {
+         if (GetBrxConnectEvent())
+@@ -1380,6 +1381,7 @@ void CommDriverN2KNet::OnSocketEvent(wxSocketEvent& event) {
+     }
+ 
+     case wxSOCKET_CONNECTION: {
++      ConnectionChanged();
+       m_driver_stats.available = true;
+       if (GetProtocol() == GPSD) {
+         //      Sign up for watcher mode, Cooked NMEA
+@@ -1415,6 +1417,7 @@ void CommDriverN2KNet::OnSocketEvent(wxSocketEvent& event) {
+ void CommDriverN2KNet::OnServerSocketEvent(wxSocketEvent& event) {
+   switch (event.GetSocketEvent()) {
+     case wxSOCKET_CONNECTION: {
++      ConnectionChanged();
+       m_driver_stats.available = true;
+       SetSock(GetSockServer()->Accept(false));
+ 
+@@ -1961,7 +1964,7 @@ bool CommDriverN2KNet::SendSentenceNetwork(
+             } else {
+               wxSocketClient* tcp_socket =
+                   dynamic_cast<wxSocketClient*>(GetSock());
+-              if (tcp_socket) tcp_socket->Close();
++              if (tcp_socket) { ConnectionChanged(); tcp_socket->Close(); }
+               if (!GetSocketTimer()->IsRunning())
+                 GetSocketTimer()->Start(
+                     5000, wxTIMER_ONE_SHOT);  // schedule a reconnect
+@@ -1997,6 +2000,7 @@ bool CommDriverN2KNet::SendSentenceNetwork(
+ }
+ 
+ void CommDriverN2KNet::Close() {
++  ConnectionChanged();
+   wxLogMessage(wxString::Format(_T("Closing NMEA NetworkDataStream %s"),
+                                 GetNetPort().c_str()));
+   m_stats_timer.Stop();
+diff --git i/gui/src/ais.cpp w/gui/src/ais.cpp
+index da348cd06..41d2f3ebd 100644
+--- i/gui/src/ais.cpp
++++ w/gui/src/ais.cpp
+@@ -24,6 +24,10 @@
+  ***************************************************************************
+  */
+ 
++#ifdef OPENNAV_X
++#include "integration/OpenCPNIntegration.h"
++#endif
++
+ #include <stdlib.h>
+ #include <math.h>
+ #include <time.h>
+@@ -1180,6 +1184,13 @@ static void AISDrawTarget(AisTargetData *td, ocpnDC &dc, ViewPort &vp,
+       TargetFrame(dc, wxPen(UBLCK, 2), TargetPoint.x, TargetPoint.y, 25);
+   }
+ 
++#ifdef OPENNAV_X
++  // OpenNav-owned selection reuses upstream symbol framing. No target data or
++  // AIS calculations are modified; Legacy retains its normal query selection.
++  if (opennav::IsAisSelected(td->MMSI))
++    TargetFrame(dc, wxPen(UBLCK, 2), TargetPoint.x, TargetPoint.y, 25);
++#endif
++
+   //       Render the COG line if the speed is greater than moored speed defined
+   //       by ais options dialog
+   if ((g_bShowCOG) && (target_sog > g_SOGminCOG_kts) && td->b_active) {
+@@ -1854,6 +1865,9 @@ static void AISDrawTarget(AisTargetData *td, ocpnDC &dc, ViewPort &vp,
+ }
+ 
+ void AISDraw(ocpnDC &dc, ViewPort &vp, ChartCanvas *cp) {
++#ifdef OPENNAV_X
++  opennav::DrawOnlineAis(dc, vp, cp);
++#endif
+   if (!g_pAIS) return;
+ 
+   // Toggling AIS display on and off
+diff --git a/model/src/comm_drv_signalk_net.cpp b/model/src/comm_drv_signalk_net.cpp
+index 995a3fe35..05add9dc9 100644
+--- a/model/src/comm_drv_signalk_net.cpp
++++ b/model/src/comm_drv_signalk_net.cpp
+@@ -30,6 +30,9 @@
+ #include <thread>
+ 
+ #include "rapidjson/document.h"
++#ifdef OPENNAV_X
++#include "integration/ExternalJson.h"
++#endif
+ 
+ #include "model/comm_drv_signalk_net.h"
+ #include "model/comm_navmsg_bus.h"
+@@ -432,6 +435,9 @@ void CommDriverSignalKNet::handle_SK_sentence(
+   // LOG_DEBUG("%s\n", msg.c_str());
+ 
+   std::string* msg = event.GetPayload().get();
++#ifdef OPENNAV_X
++  if (!msg || !opennav::integration::BoundedJsonText(*msg)) return;
++#endif
+   std::string msgTerminated = *msg;
+   msgTerminated.append("\r\n");
+ 
+@@ -444,12 +450,30 @@ void CommDriverSignalKNet::handle_SK_sentence(
+   }
+ 
+   if (!root.IsObject()) {
++#ifdef OPENNAV_X
++    // Do not copy arbitrary network contents into normal diagnostic logs.
++    wxLogMessage("Signal K document is not an object; input rejected");
++#else
+     wxLogMessage(wxString::Format(
+         _T("SignalKDataStream ERROR: Message is not a JSON Object: %s"),
+         msg->c_str()));
++#endif
+     return;
+   }
+ 
++#ifdef OPENNAV_X
++  // Untrusted handshake/context fields are read with GetString below. Reject
++  // wrong types and embedded controls before RapidJSON assertions or truncation.
++  for (const char *name : {"version", "self", "context"}) {
++    if (!root.HasMember(name)) continue;
++    const auto &value = root[name];
++    if (!value.IsString() || value.GetStringLength() > 512) return;
++    for (unsigned i = 0; i < value.GetStringLength(); ++i)
++      if (static_cast<unsigned char>(value.GetString()[i]) < 0x20 ||
++          static_cast<unsigned char>(value.GetString()[i]) == 0x7f) return;
++  }
++#endif
++
+   // Decode just enough of string to extract some identifiers
+   // such as the sK version, "self" context, and target context
+   if (root.HasMember("version")) {
+diff --git i/model/src/garmin_protocol_mgr.cpp w/model/src/garmin_protocol_mgr.cpp
+index ca58d6585..c53462755 100644
+--- i/model/src/garmin_protocol_mgr.cpp
++++ w/model/src/garmin_protocol_mgr.cpp
+@@ -34,6 +34,7 @@
+ #include <math.h>
+ #include <time.h>
+ 
++#include <memory>
+ #include <vector>
+ 
+ #ifndef _MSC_VER
+@@ -351,7 +352,9 @@ bool GarminProtocolHandler::IsGarminPlugged() {
+   hdevinfo = SetupDiGetClassDevs((GUID *)&GARMIN_GUID1, NULL, NULL,
+                                  DIGCF_PRESENT | DIGCF_INTERFACEDEVICE);
+ 
+-  if (hdevinfo == INVALID_HANDLE_VALUE) return INVALID_HANDLE_VALUE;
++  if (hdevinfo == INVALID_HANDLE_VALUE) return false;
++  std::unique_ptr<void, decltype(&SetupDiDestroyDeviceInfoList)>
++      owned_info(hdevinfo, SetupDiDestroyDeviceInfoList);
+ 
+   infodata.cbSize = sizeof(infodata);
+ 
+@@ -365,8 +368,10 @@ bool GarminProtocolHandler::IsGarminPlugged() {
+   SP_DEVINFO_DATA devinfo;
+ 
+   SetupDiGetDeviceInterfaceDetail(hdevinfo, &infodata, NULL, 0, &size, NULL);
++  if (size < sizeof(SP_INTERFACE_DEVICE_DETAIL_DATA)) return false;
+ 
+   pdd = (PSP_INTERFACE_DEVICE_DETAIL_DATA)malloc(size);
++  if (!pdd) return false;
+   pdd->cbSize = sizeof(SP_INTERFACE_DEVICE_DETAIL_DATA);
+ 
+   devinfo.cbSize = sizeof(SP_DEVINFO_DATA);
+diff --git i/model/src/ser_ports.cpp w/model/src/ser_ports.cpp
+index 4e43dafec..7367c1f73 100644
+--- i/model/src/ser_ports.cpp
++++ w/model/src/ser_ports.cpp
+@@ -32,6 +32,8 @@
+ 
+ #include <cassert>
+ #include <iostream>
++#include <memory>
++#include <type_traits>
+ 
+ #pragma GCC diagnostic push
+ #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+@@ -320,7 +322,10 @@ static std::vector<struct device_data> get_links(struct udev_device* dev,
+ }
+ 
+ static std::vector<struct device_data> enumerate_udev_ports(struct udev* udev) {
+-  struct udev_enumerate* enumerate = udev_enumerate_new(udev);
++  std::unique_ptr<struct udev_enumerate, decltype(&udev_enumerate_unref)>
++      enumeration(udev_enumerate_new(udev), udev_enumerate_unref);
++  if (!enumeration) return {};
++  auto* enumerate = enumeration.get();
+   udev_enumerate_add_match_subsystem(enumerate, "tty");
+   udev_enumerate_scan_devices(enumerate);
+   struct udev_list_entry* devices = udev_enumerate_get_list_entry(enumerate);
+@@ -330,8 +335,12 @@ static std::vector<struct device_data> enumerate_udev_ports(struct udev* udev) {
+   struct udev_list_entry* entry;
+   udev_list_entry_foreach(entry, devices) {
+     const char* const path = udev_list_entry_get_name(entry);
+-    struct udev_device* device = udev_device_new_from_syspath(udev, path);
++    std::unique_ptr<struct udev_device, decltype(&udev_device_unref)>
++        owned_device(udev_device_new_from_syspath(udev, path), udev_device_unref);
++    if (!owned_device) continue;
++    auto* device = owned_device.get();
+     const char* const devnode = udev_device_get_devnode(device);
++    if (!devnode) continue;
+     struct device_data item(devnode, get_device_info(device));
+     if (!std::regex_search(devnode, bad_ttys) &&
+         (isTTYreal(path) || item.info.length() > 0)) {
+@@ -339,15 +348,15 @@ static std::vector<struct device_data> enumerate_udev_ports(struct udev* udev) {
+       auto links = get_links(device, bad_ttys);
+       items.insert(items.end(), links.begin(), links.end());
+     }
+-    udev_device_unref(device);
+   }
+   return items;
+ }
+ 
+ #pragma GCC diagnostic pop
+ static wxArrayString* EnumerateUdevSerialPorts(void) {
+-  struct udev* udev = udev_new();
+-  auto dev_items = enumerate_udev_ports(udev);
++  std::unique_ptr<struct udev, decltype(&udev_unref)> udev(udev_new(), udev_unref);
++  auto dev_items = udev ? enumerate_udev_ports(udev.get())
++                        : std::vector<struct device_data>{};
+   wxArrayString* ports = new wxArrayString;
+   for (const auto& item : dev_items) {
+     std::string port(item.path);
+@@ -431,6 +440,8 @@ static wxArrayString* EnumerateWindowsSerialPorts(void) {
+                                  DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+ 
+   if (hDevInfo != INVALID_HANDLE_VALUE) {
++    std::unique_ptr<void, decltype(&SetupDiDestroyDeviceInfoList)>
++        owned_info(hDevInfo, SetupDiDestroyDeviceInfoList);
+     BOOL bOk = TRUE;
+     SP_DEVICE_INTERFACE_DATA ifcData;
+ 
+@@ -472,6 +483,8 @@ static wxArrayString* EnumerateWindowsSerialPorts(void) {
+               SetupDiOpenDevRegKey(hDevInfo, &devdata, DICS_FLAG_GLOBAL, 0,
+                                    DIREG_DEV, KEY_QUERY_VALUE);
+           if (INVALID_HANDLE_VALUE != hDeviceRegistryKey) {
++            std::unique_ptr<std::remove_pointer<HKEY>::type, decltype(&RegCloseKey)>
++                owned_key(hDeviceRegistryKey, RegCloseKey);
+             DWORD RegKeyType;
+             wchar_t wport[80];
+             LPCWSTR cstr = wport;
+@@ -514,6 +527,8 @@ static wxArrayString* EnumerateWindowsSerialPorts(void) {
+                                     DIGCF_PRESENT | DIGCF_INTERFACEDEVICE);
+ 
+   if (hdeviceinfo != INVALID_HANDLE_VALUE) {
++    std::unique_ptr<void, decltype(&SetupDiDestroyDeviceInfoList)>
++        owned_garmin_info(hdeviceinfo, SetupDiDestroyDeviceInfoList);
+     if (GarminProtocolHandler::IsGarminPlugged()) {
+       wxLogMessage(_T("EnumerateSerialPorts() Found Garmin USB Device."));
+       preturn->Add(_T("Garmin-USB"));  // Add generic Garmin selectable device
+diff --git i/plugins/dashboard_pi/src/dashboard_pi.cpp w/plugins/dashboard_pi/src/dashboard_pi.cpp
+index b84f858bd..96076d51f 100644
+--- i/plugins/dashboard_pi/src/dashboard_pi.cpp
++++ w/plugins/dashboard_pi/src/dashboard_pi.cpp
+@@ -27,6 +27,9 @@
+  */
+ 
+ #include <wx/wxprec.h>
++#ifdef OPENNAV_DASHBOARD_PLUGIN
++#include "integration/DashboardPresentationApi.h"
++#endif
+ 
+ #ifndef WX_PRECOMP
+ #include <wx/wx.h>
+@@ -3268,6 +3271,9 @@ void dashboard_pi::SetPluginMessage(wxString &message_id,
+ int dashboard_pi::GetToolbarToolCount(void) { return 1; }
+ 
+ void dashboard_pi::ShowPreferencesDialog(wxWindow *parent) {
++#ifdef OPENNAV_DASHBOARD_PLUGIN
++  OpenNavDashboardLayoutScope opennav_layout;
++#endif
+   DashboardPreferencesDialog *dialog = new DashboardPreferencesDialog(
+       parent, wxID_ANY, m_ArrayOfDashboardWindow);
+ 
+@@ -3384,6 +3390,9 @@ void dashboard_pi::OnPaneClose(wxAuiManagerEvent &event) {
+ }
+ 
+ void dashboard_pi::OnToolbarToolCallback(int id) {
++#ifdef OPENNAV_DASHBOARD_PLUGIN
++  OpenNavDashboardLayoutScope opennav_layout;
++#endif
+   int cnt = GetDashboardWindowShownCount();
+ 
+   bool b_anyviz = false;
+@@ -3472,6 +3481,9 @@ void dashboard_pi::OnToolbarToolCallback(int id) {
+ }
+ 
+ void dashboard_pi::UpdateAuiStatus(void) {
++#ifdef OPENNAV_DASHBOARD_PLUGIN
++  OpenNavDashboardLayoutScope opennav_layout;
++#endif
+   //    This method is called after the PlugIn is initialized
+   //    and the frame has done its initial layout, possibly from a saved
+   //    wxAuiManager "Perspective" It is a chance for the PlugIn to syncronize
+@@ -3833,6 +3845,9 @@ void dashboard_pi::LoadFont(wxFont **target, wxString native_info) {
+ }
+ 
+ bool dashboard_pi::SaveConfig(void) {
++#ifdef OPENNAV_DASHBOARD_PLUGIN
++  OpenNavDashboardLayoutScope opennav_layout;
++#endif
+   wxFileConfig *pConf = (wxFileConfig *)m_pconfig;
+ 
+   if (pConf) {
+@@ -4026,6 +4041,9 @@ bool dashboard_pi::SaveConfig(void) {
+ }
+ 
+ void dashboard_pi::ApplyConfig(void) {
++#ifdef OPENNAV_DASHBOARD_PLUGIN
++  OpenNavDashboardLayoutScope opennav_layout;
++#endif
+   // Reverse order to handle deletes
+   for (size_t i = m_ArrayOfDashboardWindow.GetCount(); i > 0; i--) {
+     DashboardWindowContainer *cont = m_ArrayOfDashboardWindow.Item(i - 1);
+@@ -4072,6 +4090,9 @@ void dashboard_pi::ApplyConfig(void) {
+                             .Gripper(false);
+ 
+       m_pauimgr->AddPane(cont->m_pDashboardWindow, p);
++#ifdef OPENNAV_DASHBOARD_PLUGIN
++      OpenNavDashboardWindow(cont->m_pDashboardWindow, true);
++#endif
+       // wxAuiPaneInfo().Name( cont->m_sName ).Caption( cont->m_sCaption
+       // ).CaptionVisible( false ).TopDockable(
+       // !vertical ).BottomDockable( !vertical ).LeftDockable( vertical
+@@ -4137,6 +4158,9 @@ void dashboard_pi::PopulateContextMenu(wxMenu *menu) {
+ }
+ 
+ void dashboard_pi::ShowDashboard(size_t id, bool visible) {
++#ifdef OPENNAV_DASHBOARD_PLUGIN
++  OpenNavDashboardLayoutScope opennav_layout;
++#endif
+   if (id < m_ArrayOfDashboardWindow.GetCount()) {
+     DashboardWindowContainer *cont = m_ArrayOfDashboardWindow.Item(id);
+     m_pauimgr->GetPane(cont->m_pDashboardWindow).Show(visible);
+@@ -5449,6 +5473,9 @@ DashboardWindow::DashboardWindow(wxWindow *pparent, wxWindowID id,
+ }
+ 
+ DashboardWindow::~DashboardWindow() {
++#ifdef OPENNAV_DASHBOARD_PLUGIN
++  OpenNavDashboardWindow(this, false);
++#endif
+   for (size_t i = 0; i < m_ArrayOfInstrument.GetCount(); i++) {
+     DashboardInstrumentContainer *pdic = m_ArrayOfInstrument.Item(i);
+     delete pdic;
+@@ -5836,6 +5863,9 @@ void DashboardWindow::SetColorScheme(PI_ColorScheme cs) {
+ 
+ void DashboardWindow::ChangePaneOrientation(int orient, bool updateAUImgr,
+                                             int fpx, int fpy) {
++#ifdef OPENNAV_DASHBOARD_PLUGIN
++  OpenNavDashboardLayoutScope opennav_layout;
++#endif
+   m_pauimgr->DetachPane(this);
+   SetSizerOrientation(orient);
+   bool vertical = orient == wxVERTICAL;
