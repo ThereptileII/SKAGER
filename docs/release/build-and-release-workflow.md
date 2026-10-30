@@ -20,7 +20,7 @@ artifact whose provenance is recorded in the release metadata.
 ## Before starting a release
 
 1. Confirm the worktree is clean and the source commit is pushed.
-2. Run `python opennav-x/tools/verify-distribution-inputs.py`.
+2. Run `python tools/verify-distribution-inputs.py`.
 3. Confirm `Version.h`, the Windows compatibility manifest and the release
    metadata contain the same version.
 4. Confirm the pinned OpenCPN revision and Win32/x86 ABI.
