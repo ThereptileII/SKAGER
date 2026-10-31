@@ -1,16 +1,19 @@
-# SKAGER third-party notices
+# Third-party notices
 
-SKAGER integrates with and distributes source/build integration for OpenCPN.
-OpenCPN is a separate prerequisite and remains available under its applicable
-GPL license and copyright notices. SKAGER does not imply OpenCPN endorsement.
+SKAGER builds on OpenCPN and other open-source components. Each component retains
+its copyright notices and applicable licence. See the root LICENSE file,
+component source notices and the full licence package supplied with the exact
+binary release.
 
-The exact OpenCPN revision used by the supported Windows build is recorded in
-`upstream.lock.json`. The release workflow publishes the corresponding source
-revision and the pinned dependency source/notice material required by the
-release contract.
+The pinned OpenCPN baseline is recorded in `upstream.lock.json` and referenced by
+`upstream/OpenCPN`. OpenCPN is installed separately for the supported Windows
+integration. SKAGER is independent of, and is not endorsed by, the OpenCPN
+project.
 
-Before each public binary release, maintainers must verify the dependency
-inventory, license text, copyright notices and corresponding-source mapping.
-The binary release is blocked if any required notice or source mapping is
-missing.
+Dependency versions, source locations and hashes are recorded in the supplied
+lock files and build scripts. Consult the corresponding-source archive and
+component inventory for your release; this introductory document is not a
+replacement for the individual licence texts.
 
+Commercial chart content and closed chart-provider components are not included
+in this repository. Consult your provider’s licence separately.
